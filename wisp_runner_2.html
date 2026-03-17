@@ -1,0 +1,2895 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WISP Runner 2 — Build the Network</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Nunito:wght@400;700;900&family=Space+Mono:wght@700&display=swap');
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#0D1117;display:flex;justify-content:center;align-items:center;min-height:100vh;font-family:'Nunito',sans-serif;overflow:hidden}
+#gameWrapper{position:relative}
+canvas{display:block;border-radius:8px;box-shadow:0 0 60px rgba(0,188,212,0.3)}
+#hud{position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;font-family:'Nunito',sans-serif}
+#topBar{display:flex;justify-content:space-between;align-items:center;padding:8px 16px;background:linear-gradient(180deg,rgba(13,71,161,0.85) 0%,rgba(13,71,161,0) 100%);color:#fff;font-size:14px;font-weight:700}
+#bottomBar{position:absolute;bottom:0;width:100%;display:flex;justify-content:space-between;align-items:center;padding:8px 16px;background:linear-gradient(0deg,rgba(13,71,161,0.85) 0%,rgba(13,71,161,0) 100%);color:#fff;font-size:14px;font-weight:700}
+.hud-section{display:flex;align-items:center;gap:10px}
+#alignPanel{position:absolute;right:16px;top:50%;transform:translateY(-50%);background:rgba(13,71,161,0.92);border:2px solid #00BCD4;border-radius:12px;padding:16px;font-family:'Space Mono',monospace;color:white;display:none;pointer-events:none;min-width:220px}
+#alignPanel h3{text-align:center;color:#00BCD4;margin-bottom:8px;font-size:13px}
+.align-row{display:flex;justify-content:space-between;margin:4px 0;font-size:12px}
+.signal-bar{height:16px;background:#263238;border-radius:8px;margin:6px 0;overflow:hidden}
+.signal-fill{height:100%;border-radius:8px;transition:width 0.15s}
+.signal-label{text-align:center;font-size:18px;font-weight:bold;margin:4px 0}
+#minimap{position:absolute;right:12px;bottom:48px;width:120px;height:120px;background:rgba(0,0,0,0.5);border:1px solid #00BCD4;border-radius:8px;pointer-events:none}
+</style>
+</head>
+<body>
+<div id="gameWrapper">
+<canvas id="gameCanvas" width="960" height="640"></canvas>
+<div id="hud">
+<div id="topBar">
+<div class="hud-section" id="hudLeft"></div>
+<div class="hud-section" id="hudCenter"></div>
+<div class="hud-section" id="hudRight"></div>
+</div>
+<div id="bottomBar">
+<div class="hud-section" id="hudBL"></div>
+<div class="hud-section" id="hudBR"></div>
+</div>
+</div>
+<div id="alignPanel"></div>
+<canvas id="minimap" width="120" height="120"></canvas>
+</div>
+<script>
+// ============================================================
+// WISP RUNNER — Complete Game Engine
+// ============================================================
+
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+const CW = 960, CH = 640;
+
+// ── MODULE 1: CONSTANTS & STATE ──
+const TILE_W = 64, TILE_H = 32, TILE_Z = 28;
+const ISO_OFFSET_X = CW / 2, ISO_OFFSET_Y = 160;
+
+const LANG = { EN: 0, ES: 1, PT: 2 };
+const STATES = { TITLE: 0, CITY_SELECT: 1, PLAYING: 2, ALIGNING: 3, CLIMBING: 4, LEVEL_CLEAR: 5, GAME_OVER: 6, PAUSED: 7, INSTRUCTIONS: 8, NEGOTIATING: 9 };
+
+const G = {
+  state: STATES.TITLE,
+  lang: LANG.ES,
+  score: 0,
+  hiScore: 0,
+  lives: 3,
+  level: 0,
+  levelInCity: 0,
+  cityIdx: 0,
+  timer: 90,
+  timerMax: 90,
+  installed: 0,
+  required: 3,
+  careerLevel: 1,
+  careerXP: 0,
+  dt: 0,
+  lastTime: 0,
+  keys: {},
+  keysJust: {},
+  camera: { x: 0, y: 0 },
+  rotation: 0, // 0-3, rotated by Q/E keys
+  particles: [],
+  notifications: [],
+  weather: null,
+  weatherTimer: 0,
+  competitors: [],
+  installPoints: [],
+  towers: [],
+  buildings: [],
+  signalArcs: [],
+  titleAnim: 0,
+  levelClearTimer: 0,
+  gameOverTimer: 0,
+  shakeTimer: 0,
+  shakeIntensity: 0,
+  flash: 0,
+  unlockedCities: [true, false, false, false, false, false, false, false, false, false],
+  cityStars: [0,0,0,0,0,0,0,0,0,0],
+  savedLevel: 0,
+  musicPlaying: false,
+  sfxEnabled: true,
+  titleSelection: 0,
+  citySelection: 0,
+  easterEggBuffer: '',
+  achievements: [],
+  consecutiveExcellent: 0,
+  competitorsDefeated: 0,
+};
+
+// ── MODULE 2: LANGUAGE ──
+const STRINGS = {
+  title: ['WISP RUNNER', 'WISP RUNNER', 'WISP RUNNER'],
+  subtitle: ['Build the Network. Conquer the City.', 'Construye la Red. Conquista la Ciudad.', 'Construa a Rede. Conquiste a Cidade.'],
+  newGame: ['NEW GAME', 'NUEVA PARTIDA', 'NOVO JOGO'],
+  continueGame: ['CONTINUE', 'CONTINUAR', 'CONTINUAR'],
+  quickCity: ['QUICK CITY', 'CIUDAD RÁPIDA', 'CIDADE RÁPIDA'],
+  credits: ['CREDITS', 'CRÉDITOS', 'CRÉDITOS'],
+  techJr: ['TECH JR', 'TÉCNICO JR', 'TÉCNICO JR'],
+  techSr: ['TECH SR', 'TÉCNICO SR', 'TÉCNICO SR'],
+  engineer: ['RF ENGINEER', 'INGENIERO RF', 'ENGENHEIRO RF'],
+  owner: ['WISP OWNER', 'DUEÑO WISP', 'DONO WISP'],
+  excellent: ['EXCELLENT LINK!', '¡ENLACE EXCELENTE!', 'ENLACE EXCELENTE!'],
+  good: ['LINK OK', 'ENLACE OK', 'ENLACE OK'],
+  weak: ['WEAK SIGNAL', 'SEÑAL DÉBIL', 'SINAL FRACO'],
+  levelClear: ['LEVEL CLEAR!', '¡NIVEL COMPLETADO!', 'NÍVEL COMPLETO!'],
+  gameOver: ['GAME OVER', 'FIN DEL JUEGO', 'FIM DE JOGO'],
+  score: ['SCORE', 'PUNTOS', 'PONTOS'],
+  time: ['TIME', 'TIEMPO', 'TEMPO'],
+  press: ['Press ENTER / SPACE', 'Presiona ENTER / ESPACIO', 'Pressione ENTER / ESPAÇO'],
+  install: ['Installations', 'Instalaciones', 'Instalações'],
+  lockAntenna: ['SPACE to Lock', 'ESPACIO para Fijar', 'ESPAÇO para Fixar'],
+  climbPrompt: ['SPACE at green zones!', '¡ESPACIO en zonas verdes!', 'ESPAÇO nas zonas verdes!'],
+  back: ['ESC: Back', 'ESC: Volver', 'ESC: Voltar'],
+  paused: ['PAUSED', 'PAUSA', 'PAUSA'],
+  instructions: ['INSTRUCTIONS', 'INSTRUCCIONES', 'INSTRUÇÕES'],
+  instrMove: ['WASD / Arrows: Move technician', 'WASD / Flechas: Mover técnico', 'WASD / Setas: Mover técnico'],
+  instrClimb: ['SPACE near building: Climb to rooftop', 'ESPACIO cerca de edificio: Subir al techo', 'ESPAÇO perto do prédio: Subir ao telhado'],
+  instrClimbTip: ['Hit SPACE at green zones to climb faster!', '¡Presiona ESPACIO en zonas verdes para subir más rápido!', 'Pressione ESPAÇO nas zonas verdes para subir mais rápido!'],
+  instrAlign: ['Arrows: Adjust azimuth & elevation', 'Flechas: Ajustar azimuth y elevación', 'Setas: Ajustar azimute e elevação'],
+  instrLock: ['SPACE: Lock antenna when signal is strong', 'ESPACIO: Fijar antena cuando la señal es fuerte', 'ESPAÇO: Fixar antena quando o sinal é forte'],
+  instrSignal: ['-65 dBm or better = EXCELLENT (x2 points)', '-65 dBm o mejor = EXCELENTE (x2 puntos)', '-65 dBm ou melhor = EXCELENTE (x2 pontos)'],
+  instrWeather: ['Rain/Wind affect climbing & alignment', 'Lluvia/Viento afectan escalada y alineación', 'Chuva/Vento afetam escalada e alinhamento'],
+  instrComp: ['Competitors race you to install points!', '¡Competidores compiten por puntos de instalación!', 'Competidores disputam pontos de instalação!'],
+  instrPause: ['P / ESC: Pause game', 'P / ESC: Pausar juego', 'P / ESC: Pausar jogo'],
+  instrHelp: ['H: Show/hide instructions', 'H: Mostrar/ocultar instrucciones', 'H: Mostrar/ocultar instruções'],
+  instrRotate: ['Q / E: Rotate camera view', 'Q / E: Girar vista de cámara', 'Q / E: Girar vista da câmera'],
+  instrNego: ['SPACE on red flag: Negotiate to win client back', 'ESPACIO en bandera roja: Negociar para recuperar cliente', 'ESPAÇO na bandeira vermelha: Negociar para recuperar cliente'],
+  instrGoal: ['Install all antennas before time runs out!', '¡Instala todas las antenas antes de que se acabe el tiempo!', 'Instale todas as antenas antes do tempo acabar!'],
+  copyright: ['© 2026 WISP Runner | Made with love for WISPA, WISPMX & ABRINT',
+              '© 2026 WISP Runner | Hecho con amor para WISPA, WISPMX & ABRINT',
+              '© 2026 WISP Runner | Feito com amor para WISPA, WISPMX & ABRINT'],
+};
+function T(key) { return STRINGS[key] ? STRINGS[key][G.lang] || STRINGS[key][0] : key; }
+
+// ── MODULE 3: ISOMETRIC ENGINE ──
+function rotateCoords(tx, ty) {
+  const size = currentMap ? currentMap.size : 12;
+  const cx = (size - 1) / 2, cy = (size - 1) / 2;
+  const rx = tx - cx, ry = ty - cy;
+  switch (G.rotation % 4) {
+    case 0: return { tx, ty };
+    case 1: return { tx: cx - ry, ty: cy + rx };
+    case 2: return { tx: cx - rx, ty: cy - ry };
+    case 3: return { tx: cx + ry, ty: cy - rx };
+  }
+}
+
+function isoToScreen(tx, ty, tz = 0) {
+  const r = rotateCoords(tx, ty);
+  return {
+    sx: (r.tx - r.ty) * TILE_W / 2 + ISO_OFFSET_X + G.camera.x,
+    sy: (r.tx + r.ty) * TILE_H / 2 - tz * TILE_Z + ISO_OFFSET_Y + G.camera.y
+  };
+}
+
+function unrotateCoords(tx, ty) {
+  // Inverse of rotateCoords
+  const size = currentMap ? currentMap.size : 12;
+  const cx = (size - 1) / 2, cy = (size - 1) / 2;
+  const rx = tx - cx, ry = ty - cy;
+  switch (G.rotation % 4) {
+    case 0: return { tx, ty };
+    case 1: return { tx: cx + ry, ty: cy - rx };
+    case 2: return { tx: cx - rx, ty: cy - ry };
+    case 3: return { tx: cx - ry, ty: cy + rx };
+  }
+}
+
+function screenToIso(sx, sy) {
+  const ax = sx - ISO_OFFSET_X - G.camera.x;
+  const ay = sy - ISO_OFFSET_Y - G.camera.y;
+  const rtx = (ax / (TILE_W/2) + ay / (TILE_H/2)) / 2;
+  const rty = (ay / (TILE_H/2) - ax / (TILE_W/2)) / 2;
+  const un = unrotateCoords(rtx, rty);
+  return { tx: Math.floor(un.tx), ty: Math.floor(un.ty) };
+}
+
+function shadeColor(color, percent) {
+  const num = parseInt(color.replace('#',''), 16);
+  const amt = Math.round(2.55 * percent);
+  const R = Math.max(0, Math.min(255, (num >> 16) + amt));
+  const Gr = Math.max(0, Math.min(255, (num >> 8 & 0x00FF) + amt));
+  const B = Math.max(0, Math.min(255, (num & 0x0000FF) + amt));
+  return '#' + (0x1000000 + R * 0x10000 + Gr * 0x100 + B).toString(16).slice(1);
+}
+
+function drawIsoTile(ctx, sx, sy, color, stroke) {
+  ctx.fillStyle = color;
+  ctx.strokeStyle = stroke || '#333';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(sx, sy);
+  ctx.lineTo(sx + TILE_W/2, sy + TILE_H/2);
+  ctx.lineTo(sx, sy + TILE_H);
+  ctx.lineTo(sx - TILE_W/2, sy + TILE_H/2);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+}
+
+function drawIsoBuilding(ctx, sx, sy, floors, color, strokeC) {
+  const w = TILE_W, h = TILE_H, z = TILE_Z * floors;
+  const stroke = strokeC || '#546E7A';
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = stroke;
+
+  // Left face
+  ctx.fillStyle = shadeColor(color, -25);
+  ctx.beginPath();
+  ctx.moveTo(sx - w/2, sy + h/2);
+  ctx.lineTo(sx, sy + h);
+  ctx.lineTo(sx, sy + h - z);
+  ctx.lineTo(sx - w/2, sy + h/2 - z);
+  ctx.closePath();
+  ctx.fill(); ctx.stroke();
+
+  // Right face
+  ctx.fillStyle = shadeColor(color, -10);
+  ctx.beginPath();
+  ctx.moveTo(sx + w/2, sy + h/2);
+  ctx.lineTo(sx, sy + h);
+  ctx.lineTo(sx, sy + h - z);
+  ctx.lineTo(sx + w/2, sy + h/2 - z);
+  ctx.closePath();
+  ctx.fill(); ctx.stroke();
+
+  // Top face
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.moveTo(sx, sy - z + h);
+  ctx.lineTo(sx - w/2, sy + h/2 - z);
+  ctx.lineTo(sx, sy - z);
+  ctx.lineTo(sx + w/2, sy + h/2 - z);
+  ctx.closePath();
+  ctx.fill(); ctx.stroke();
+
+  // Windows
+  ctx.fillStyle = 'rgba(255,255,200,0.4)';
+  for (let f = 0; f < floors; f++) {
+    const wy = sy + h - (f + 0.5) * TILE_Z;
+    for (let wi = 0; wi < 2; wi++) {
+      // Left face windows
+      const lwx = sx - w/4 + wi * 8 - 4;
+      ctx.fillRect(lwx - 2, wy - 4, 4, 6);
+      // Right face windows
+      const rwx = sx + w/4 - wi * 8 - 4;
+      ctx.fillRect(rwx - 2, wy - 4, 4, 6);
+    }
+  }
+}
+
+function drawTower(ctx, sx, sy, height) {
+  const bh = height * TILE_Z;
+  const baseY = sy + TILE_H;
+  // Tower legs
+  ctx.strokeStyle = '#78909C';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(sx - 8, baseY);
+  ctx.lineTo(sx - 3, baseY - bh);
+  ctx.moveTo(sx + 8, baseY);
+  ctx.lineTo(sx + 3, baseY - bh);
+  ctx.stroke();
+  // Cross braces
+  const segments = Math.floor(height * 2);
+  for (let i = 0; i < segments; i++) {
+    const y1 = baseY - (i / segments) * bh;
+    const y2 = baseY - ((i + 1) / segments) * bh;
+    const x1l = sx - 8 + (3 / bh) * (bh - (baseY - y1)) * 1.5;
+    const x1r = sx + 8 - (3 / bh) * (bh - (baseY - y1)) * 1.5;
+    ctx.strokeStyle = (i % 2 === 0) ? '#E53935' : '#FFFFFF';
+    ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    ctx.moveTo(x1l, y1); ctx.lineTo(x1r, y2);
+    ctx.stroke();
+  }
+  // Top platform
+  ctx.fillStyle = '#B0BEC5';
+  ctx.fillRect(sx - 6, baseY - bh - 4, 12, 4);
+  // Antenna
+  ctx.strokeStyle = '#E53935';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(sx, baseY - bh - 4);
+  ctx.lineTo(sx, baseY - bh - 18);
+  ctx.stroke();
+  // Blinking light
+  const blink = Math.sin(performance.now() / 300) > 0;
+  if (blink) {
+    ctx.fillStyle = '#FF1744';
+    ctx.beginPath();
+    ctx.arc(sx, baseY - bh - 18, 3, 0, Math.PI * 2);
+    ctx.fill();
+    // Glow
+    ctx.fillStyle = 'rgba(255,23,68,0.3)';
+    ctx.beginPath();
+    ctx.arc(sx, baseY - bh - 18, 8, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  // Sector antennas
+  ctx.fillStyle = '#ECEFF1';
+  ctx.strokeStyle = '#78909C';
+  ctx.lineWidth = 1;
+  [-1, 1].forEach(dir => {
+    ctx.fillRect(sx + dir * 4 - 2, baseY - bh - 10, 4, 8);
+    ctx.strokeRect(sx + dir * 4 - 2, baseY - bh - 10, 4, 8);
+  });
+}
+
+// ── MODULE 4: CITY MAP GENERATOR ──
+const CITY_DATA = [
+  { id:'monterrey', name:['Monterrey, Mexico','Monterrey, México','Monterrey, México'],
+    subtitle:['City of Mountains','Ciudad de las Montañas','Cidade das Montanhas'],
+    sky:'#87CEEB', ambient:'#FFF3E0', buildColor:'#ECEFF1', roadColor:'#78909C',
+    groundColor:'#A5D6A7', levels:[1,2,3], weatherChance:0.2,
+    tip:['North wind can shift antennas 3°!','¡El viento del norte mueve antenas 3°!','Vento norte move antenas 3°!'] },
+  { id:'cdmx', name:['Mexico City','Ciudad de México','Cidade do México'],
+    subtitle:['The Digital Capital','La Capital Digital','A Capital Digital'],
+    sky:'#B0BEC5', ambient:'#F3E5F5', buildColor:'#E0E0E0', roadColor:'#616161',
+    groundColor:'#C8E6C9', levels:[4,5,6], weatherChance:0.4,
+    tip:['High density = high interference','Alta densidad = alta interferencia','Alta densidade = alta interferência'] },
+  { id:'guadalajara', name:['Guadalajara, Mexico','Guadalajara, México','Guadalajara, México'],
+    subtitle:["Mexico's Silicon Valley",'El Silicon Valley de México','O Silicon Valley do México'],
+    sky:'#E3F2FD', ambient:'#E8F5E9', buildColor:'#EFEBE9', roadColor:'#6D4C41',
+    groundColor:'#A5D6A7', levels:[7,8,9], weatherChance:0.35,
+    tip:['PtP links are key here','Los enlaces PtP son clave aquí','Links PtP são essenciais aqui'] },
+  { id:'rio', name:['Rio de Janeiro','Rio de Janeiro','Rio de Janeiro'],
+    subtitle:['Marvelous City','Ciudad Maravillosa','Cidade Maravilhosa'],
+    sky:'#E1F5FE', ambient:'#FFF8E1', buildColor:'#FFF9C4', roadColor:'#5D4037',
+    groundColor:'#81C784', levels:[10,11,12], weatherChance:0.5,
+    tip:['Hills block LOS — use repeaters','Las colinas bloquean — usa repetidores','Morros bloqueiam — use repetidores'] },
+  { id:'saopaulo', name:['São Paulo','São Paulo','São Paulo'],
+    subtitle:['City That Never Stops','La Ciudad que No Para','A Cidade que Nunca Para'],
+    sky:'#CFD8DC', ambient:'#ECEFF1', buildColor:'#E0E0E0', roadColor:'#424242',
+    groundColor:'#AED581', levels:[13,14,15], weatherChance:0.45,
+    tip:['Every dB counts here','Cada dB cuenta aquí','Cada dB conta aqui'] },
+  { id:'dallas', name:['Dallas, Texas','Dallas, Texas','Dallas, Texas'],
+    subtitle:['Big D Network','Big D Network','Big D Network'],
+    sky:'#FFF9C4', ambient:'#FFF3E0', buildColor:'#E8EAF6', roadColor:'#546E7A',
+    groundColor:'#C5E1A5', levels:[16,17,18], weatherChance:0.3,
+    tip:['AT&T is home here. Move fast!','AT&T está en casa. ¡Muévete rápido!','AT&T é de casa. Mova-se rápido!'] },
+  { id:'bogota', name:['Bogotá, Colombia','Bogotá, Colombia','Bogotá, Colômbia'],
+    subtitle:['Andean City','Ciudad Andina','Cidade Andina'],
+    sky:'#B3E5FC', ambient:'#E0F7FA', buildColor:'#FFF3E0', roadColor:'#5D4037',
+    groundColor:'#66BB6A', levels:[19,20,21], weatherChance:0.6,
+    tip:['At 2600m adjust power +2dB','A 2600m ajusta potencia +2dB','A 2600m ajuste potência +2dB'] },
+  { id:'buenosaires', name:['Buenos Aires','Buenos Aires','Buenos Aires'],
+    subtitle:['Paris of the South','La París del Sur','A Paris do Sul'],
+    sky:'#E8EAF6', ambient:'#F3E5F5', buildColor:'#EEEEEE', roadColor:'#455A64',
+    groundColor:'#AED581', levels:[22,23,24], weatherChance:0.35,
+    tip:['Similar rooftops — pick the right antenna','Techos similares — elige la antena correcta','Telhados similares — escolha a antena certa'] },
+  { id:'miami', name:['Miami, Florida','Miami, Florida','Miami, Flórida'],
+    subtitle:['Magic City Signal','Magic City Signal','Magic City Signal'],
+    sky:'#80DEEA', ambient:'#E0F7FA', buildColor:'#FFF9C4', roadColor:'#455A64',
+    groundColor:'#A5D6A7', levels:[25,26,27], weatherChance:0.55,
+    tip:['Secure cables well — Miami wind!','¡Asegura cables — viento de Miami!','Prenda os cabos — vento de Miami!'] },
+  { id:'finale', name:['GRAND FINALE','GRAN FINAL','GRANDE FINAL'],
+    subtitle:['National Network!','¡Red Nacional!','Rede Nacional!'],
+    sky:'#1A237E', ambient:'#1A237E', buildColor:'#B0BEC5', roadColor:'#37474F',
+    groundColor:'#2E7D32', levels:[28,29,30], weatherChance:1.0,
+    tip:['Connect everything!','¡Conéctalo todo!','Conecte tudo!'], isFinale:true },
+];
+
+function generateMap(cityIdx, levelInCity) {
+  const city = CITY_DATA[cityIdx];
+  const size = 10 + Math.min(cityIdx, 4);
+  const map = [];
+  const buildings = [];
+  const towers = [];
+  const installPts = [];
+
+  // Generate ground grid
+  for (let x = 0; x < size; x++) {
+    map[x] = [];
+    for (let y = 0; y < size; y++) {
+      map[x][y] = { type: 'ground', floors: 0 };
+    }
+  }
+
+  // Roads (cross pattern + perimeter)
+  const midX = Math.floor(size / 2);
+  const midY = Math.floor(size / 2);
+  for (let i = 0; i < size; i++) {
+    map[midX][i].type = 'road';
+    map[i][midY].type = 'road';
+    map[0][i].type = 'road';
+    map[i][0].type = 'road';
+  }
+
+  // Seed random based on city+level
+  let seed = cityIdx * 1000 + levelInCity * 100 + 42;
+  function srand() { seed = (seed * 16807 + 0) % 2147483647; return (seed & 0x7fffffff) / 0x7fffffff; }
+
+  // Buildings
+  const maxFloors = 2 + cityIdx + levelInCity;
+  for (let x = 1; x < size; x++) {
+    for (let y = 1; y < size; y++) {
+      if (map[x][y].type === 'road') continue;
+      if (srand() > 0.55) {
+        const floors = Math.floor(srand() * Math.min(maxFloors, 8)) + 1;
+        map[x][y] = { type: 'building', floors };
+        buildings.push({ x, y, floors, color: city.buildColor });
+      }
+    }
+  }
+
+  // Towers (1-4 depending on city progress)
+  const towerCount = Math.min(1 + Math.floor(cityIdx / 2) + levelInCity, 5);
+  for (let t = 0; t < towerCount; t++) {
+    let tx, ty, attempts = 0;
+    do {
+      tx = Math.floor(srand() * (size - 2)) + 1;
+      ty = Math.floor(srand() * (size - 2)) + 1;
+      attempts++;
+    } while ((map[tx][ty].type !== 'ground' || towers.some(tt => Math.abs(tt.x-tx)+Math.abs(tt.y-ty) < 3)) && attempts < 50);
+    if (attempts < 50) {
+      map[tx][ty] = { type: 'tower', floors: 0 };
+      towers.push({ x: tx, y: ty, height: 4 + Math.floor(srand() * 3) });
+    }
+  }
+
+  // Install points (on building rooftops)
+  const numInstalls = 2 + levelInCity + Math.floor(cityIdx / 2);
+  const candidates = buildings.filter(b => b.floors >= 2).sort(() => srand() - 0.5);
+  for (let i = 0; i < Math.min(numInstalls, candidates.length); i++) {
+    const b = candidates[i];
+    // Find nearest tower
+    let nearestTower = towers[0];
+    let nearestDist = Infinity;
+    towers.forEach(tw => {
+      const d = Math.abs(tw.x - b.x) + Math.abs(tw.y - b.y);
+      if (d < nearestDist) { nearestDist = d; nearestTower = tw; }
+    });
+    installPts.push({
+      x: b.x, y: b.y, floors: b.floors,
+      tower: nearestTower,
+      done: false,
+      optimalAz: Math.floor(Math.atan2(nearestTower.y - b.y, nearestTower.x - b.x) * 180 / Math.PI + 180) % 360,
+      optimalEl: Math.min(25, Math.max(2, Math.floor(Math.atan2(nearestTower.height * TILE_Z, Math.max(nearestDist, 2) * TILE_W) * 180 / Math.PI))),
+    });
+  }
+
+  return { map, buildings, towers, installPts, size, city };
+}
+
+// ── MODULE 5: AUDIO ENGINE ──
+let audioCtx = null;
+function initAudio() {
+  if (audioCtx) return;
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+}
+
+function playTone(freq, duration, type = 'square', vol = 0.08) {
+  if (!audioCtx || !G.sfxEnabled) return;
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.type = type;
+  osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+  gain.gain.setValueAtTime(vol, audioCtx.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + duration);
+  osc.connect(gain);
+  gain.connect(audioCtx.destination);
+  osc.start();
+  osc.stop(audioCtx.currentTime + duration);
+}
+
+function sfx(name) {
+  if (!audioCtx) return;
+  switch(name) {
+    case 'step': playTone(200, 0.04, 'sine', 0.03); break;
+    case 'climb': playTone(300 + Math.random()*100, 0.06, 'triangle', 0.05); break;
+    case 'install': [523,659,784,1047].forEach((f,i) => setTimeout(()=>playTone(f,0.15,'sine',0.1), i*100)); break;
+    case 'excellent': [523,659,784,1047,1319].forEach((f,i) => setTimeout(()=>playTone(f,0.2,'sine',0.12), i*80)); break;
+    case 'good': [440,554,659].forEach((f,i) => setTimeout(()=>playTone(f,0.15,'sine',0.08), i*100)); break;
+    case 'weak': [330,277].forEach((f,i) => setTimeout(()=>playTone(f,0.2,'sawtooth',0.06), i*150)); break;
+    case 'competitor': playTone(200, 0.15, 'sawtooth', 0.1); setTimeout(()=>playTone(180, 0.15, 'sawtooth', 0.1), 200); break;
+    case 'coin': playTone(1100, 0.06, 'square', 0.08); setTimeout(()=>playTone(1400, 0.1, 'square', 0.08), 60); break;
+    case 'lock': playTone(880, 0.05, 'sine', 0.1); setTimeout(()=>playTone(880, 0.05, 'sine', 0.1), 80); break;
+    case 'thunder': {
+      const buf = audioCtx.createBuffer(1, audioCtx.sampleRate * 1.5, audioCtx.sampleRate);
+      const d = buf.getChannelData(0);
+      for (let i = 0; i < d.length; i++) d[i] = (Math.random()*2-1) * Math.exp(-i/(audioCtx.sampleRate*0.3));
+      const src = audioCtx.createBufferSource();
+      src.buffer = buf;
+      const filt = audioCtx.createBiquadFilter();
+      filt.type = 'lowpass'; filt.frequency.value = 300;
+      const g = audioCtx.createGain(); g.gain.value = 0.15;
+      src.connect(filt); filt.connect(g); g.connect(audioCtx.destination);
+      src.start();
+      break;
+    }
+    case 'levelClear': [523,587,659,784,880,1047,1175,1319].forEach((f,i) => setTimeout(()=>playTone(f,0.25,'sine',0.1), i*100)); break;
+    case 'gameOver': [440,415,392,349,330,294].forEach((f,i) => setTimeout(()=>playTone(f,0.3,'triangle',0.08), i*150)); break;
+    case 'wind': {
+      if (!audioCtx) return;
+      const buf = audioCtx.createBuffer(1, audioCtx.sampleRate, audioCtx.sampleRate);
+      const d = buf.getChannelData(0);
+      for (let i = 0; i < d.length; i++) d[i] = (Math.random()*2-1);
+      const src = audioCtx.createBufferSource(); src.buffer = buf;
+      const filt = audioCtx.createBiquadFilter(); filt.type='bandpass'; filt.frequency.value=800; filt.Q.value=2;
+      const g = audioCtx.createGain(); g.gain.setValueAtTime(0.04,audioCtx.currentTime);
+      g.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime+2);
+      src.connect(filt); filt.connect(g); g.connect(audioCtx.destination); src.start();
+      break;
+    }
+    case 'select': playTone(660, 0.08, 'sine', 0.06); break;
+    case 'menuMove': playTone(440, 0.04, 'sine', 0.04); break;
+    case 'rain': {
+      if (!audioCtx) return;
+      const buf = audioCtx.createBuffer(1, audioCtx.sampleRate * 2, audioCtx.sampleRate);
+      const d = buf.getChannelData(0);
+      for (let i = 0; i < d.length; i++) d[i] = (Math.random()*2-1);
+      const src = audioCtx.createBufferSource(); src.buffer = buf;
+      const filt = audioCtx.createBiquadFilter(); filt.type='bandpass'; filt.frequency.value=3000; filt.Q.value=0.5;
+      const g = audioCtx.createGain(); g.gain.value = 0.03;
+      g.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime+2);
+      src.connect(filt); filt.connect(g); g.connect(audioCtx.destination); src.start();
+      break;
+    }
+  }
+}
+
+// Background music
+let bgmOscs = [];
+function startBGM(cityIdx) {
+  stopBGM();
+  if (!audioCtx) return;
+  const scales = [
+    [261,293,329,349,392,440,493], // C major (monterrey)
+    [261,293,311,349,392,415,466], // C minor (cdmx)
+    [293,329,370,392,440,493,554], // D major (guadalajara)
+    [220,261,293,329,349,392,440], // A minor (rio)
+    [246,293,329,370,392,440,493], // B minor (saopaulo)
+    [293,349,392,440,493,554,587], // D mixolydian (dallas)
+    [261,293,329,349,392,440,493], // C major (bogota)
+    [220,246,261,293,329,349,392], // A (baires)
+    [293,329,370,392,440,493,554], // D (miami)
+    [261,329,392,493,587,659,784], // C pentatonic (finale)
+  ];
+  const scale = scales[cityIdx % scales.length];
+  const bpm = 120 + cityIdx * 5;
+  const noteLen = 60 / bpm;
+
+  let noteIdx = 0;
+  function scheduleNote() {
+    if (!audioCtx || bgmOscs.length === 0) return;
+    const freq = scale[noteIdx % scale.length];
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = 'sine';
+    osc.frequency.value = freq * (Math.random() > 0.7 ? 0.5 : 1);
+    gain.gain.setValueAtTime(0.03, audioCtx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + noteLen * 0.9);
+    osc.connect(gain); gain.connect(audioCtx.destination);
+    osc.start(); osc.stop(audioCtx.currentTime + noteLen);
+    noteIdx++;
+  }
+
+  const interval = setInterval(scheduleNote, noteLen * 1000);
+  bgmOscs.push({ interval });
+  G.musicPlaying = true;
+}
+
+function stopBGM() {
+  bgmOscs.forEach(o => clearInterval(o.interval));
+  bgmOscs = [];
+  G.musicPlaying = false;
+}
+
+// ── MODULE 6: INPUT ──
+document.addEventListener('keydown', e => {
+  if (!G.keys[e.code]) G.keysJust[e.code] = true;
+  G.keys[e.code] = true;
+  // Easter egg buffer
+  if (G.state === STATES.TITLE) {
+    G.easterEggBuffer += e.key.toUpperCase();
+    if (G.easterEggBuffer.length > 20) G.easterEggBuffer = G.easterEggBuffer.slice(-20);
+    if (G.easterEggBuffer.endsWith('WISPA')) {
+      addNotification('WISPAPALOOZA MODE! +50% Speed!', '#FFD600', CW/2, CH/2);
+      sfx('excellent');
+      G.easterEggBuffer = '';
+    }
+    if (G.easterEggBuffer.endsWith('MIMOSA')) {
+      addNotification('MIMOSA A5x UNLOCKED!', '#FFD600', CW/2, CH/2);
+      sfx('excellent');
+      G.easterEggBuffer = '';
+    }
+  }
+  e.preventDefault();
+});
+document.addEventListener('keyup', e => { G.keys[e.code] = false; });
+
+function justPressed(code) {
+  if (G.keysJust[code]) { G.keysJust[code] = false; return true; }
+  return false;
+}
+
+// ── MODULE 7: TECHNICIAN ──
+const tech = {
+  x: 5, y: 5, z: 0,
+  targetX: 5, targetY: 5,
+  moving: false,
+  facing: 'down',
+  animFrame: 0,
+  animTimer: 0,
+  state: 'idle', // idle, walking, climbing, installing, celebrating
+  climbProgress: 0,
+  climbTarget: 0,
+  climbZones: [],
+  climbNextZone: 0,
+  speed: 2.5,
+  onBuilding: null,
+};
+
+function drawTechnician(ctx) {
+  const pos = isoToScreen(tech.x, tech.y, tech.z);
+  const sx = pos.sx, sy = pos.sy;
+  const bounce = tech.state === 'walking' ? Math.sin(tech.animTimer * 12) * 2 : 0;
+  const by = sy - 10 + bounce;
+
+  // Shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.2)';
+  ctx.beginPath();
+  ctx.ellipse(sx, sy + TILE_H/2, 8, 4, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Body
+  ctx.fillStyle = '#1565C0';
+  ctx.fillRect(sx - 5, by - 8, 10, 12);
+
+  // Head
+  ctx.fillStyle = '#FFCC80';
+  ctx.beginPath();
+  ctx.arc(sx, by - 14, 6, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Helmet
+  ctx.fillStyle = '#FF6D00';
+  ctx.beginPath();
+  ctx.arc(sx, by - 16, 7, Math.PI, 0);
+  ctx.fill();
+  ctx.fillRect(sx - 7, by - 16, 14, 3);
+
+  // Legs
+  ctx.fillStyle = '#37474F';
+  const legPhase = tech.state === 'walking' ? Math.sin(tech.animTimer * 12) * 3 : 0;
+  ctx.fillRect(sx - 4, by + 4, 3, 6 + legPhase);
+  ctx.fillRect(sx + 1, by + 4, 3, 6 - legPhase);
+
+  // Backpack
+  ctx.fillStyle = '#455A64';
+  ctx.fillRect(sx + 4, by - 8, 5, 8);
+
+  // Tool (antenna or wrench)
+  if (tech.state === 'installing') {
+    ctx.strokeStyle = '#FFD600';
+    ctx.lineWidth = 2;
+    const toolAngle = Math.sin(tech.animTimer * 8) * 0.5;
+    ctx.save();
+    ctx.translate(sx - 8, by - 6);
+    ctx.rotate(toolAngle);
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.lineTo(-8, -8);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // Career badge indicator
+  const careerColor = G.careerLevel <= 10 ? '#FF6D00' : G.careerLevel <= 20 ? '#FFD600' : G.careerLevel <= 25 ? '#00BCD4' : '#7C4DFF';
+  ctx.fillStyle = careerColor;
+  ctx.beginPath();
+  ctx.arc(sx, by - 22, 3, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function getCareerTitle() {
+  if (G.careerLevel <= 10) return T('techJr');
+  if (G.careerLevel <= 20) return T('techSr');
+  if (G.careerLevel <= 25) return T('engineer');
+  return T('owner');
+}
+
+function moveSpeed() {
+  let s = tech.speed;
+  if (G.careerLevel > 10) s *= 1.2;
+  if (G.careerLevel > 20) s *= 1.15;
+  if (G.weather === 'rain') s *= 0.7;
+  if (G.weather === 'heat') s *= 0.8;
+  return s;
+}
+
+// ── MODULE 8: ALIGNMENT MINI-GAME ──
+const align = {
+  azimuth: 180,
+  elevation: 5,
+  targetAz: 180,
+  targetEl: 10,
+  signal: -90,
+  locked: false,
+  currentPoint: null,
+  windOffset: 0,
+};
+
+function calcSignal() {
+  let azDiff = Math.abs(align.azimuth - align.targetAz);
+  if (azDiff > 180) azDiff = 360 - azDiff; // Wrap around
+  const elDiff = Math.abs(align.elevation - align.targetEl);
+  const totalErr = azDiff * 0.5 + elDiff * 1.5;
+  let dbm = -50 - totalErr * 1.2;
+  // Wind effect
+  if (G.weather === 'wind' || G.weather === 'rain') {
+    align.windOffset += (Math.random() - 0.5) * 2;
+    align.windOffset *= 0.95;
+    dbm += align.windOffset;
+  }
+  // City altitude bonus penalty
+  if (G.cityIdx === 6) dbm -= 2; // Bogota altitude
+  return Math.max(-100, Math.min(-40, dbm));
+}
+
+function updateAlignment() {
+  if (G.state !== STATES.ALIGNING) return;
+
+  const spd = 4;
+  if (G.keys['ArrowLeft']) align.azimuth = (align.azimuth - spd + 360) % 360;
+  if (G.keys['ArrowRight']) align.azimuth = (align.azimuth + spd) % 360;
+  if (G.keys['ArrowUp']) align.elevation = Math.min(45, align.elevation + 2);
+  if (G.keys['ArrowDown']) align.elevation = Math.max(-10, align.elevation - 2);
+
+  align.signal += (calcSignal() - align.signal) * 0.2;
+
+  if (justPressed('Space')) {
+    align.locked = true;
+    const pt = align.currentPoint;
+    let quality, mult, label;
+
+    if (align.signal >= -65) {
+      quality = 'excellent'; mult = 2.0; label = T('excellent');
+      sfx('excellent');
+      G.consecutiveExcellent++;
+    } else if (align.signal >= -75) {
+      quality = 'good'; mult = 1.0; label = T('good');
+      sfx('good');
+      G.consecutiveExcellent = 0;
+    } else {
+      quality = 'weak'; mult = 0.5; label = T('weak');
+      sfx('weak');
+      G.consecutiveExcellent = 0;
+    }
+
+    // Score
+    const baseScore = G.careerLevel <= 10 ? 50 : G.careerLevel <= 20 ? 150 : G.careerLevel <= 25 ? 400 : 1000;
+    const points = Math.floor(baseScore * mult);
+    G.score += points;
+    sfx('coin');
+
+    // Weather bonus
+    if (G.weather === 'rain' || G.weather === 'lightning') {
+      G.score += 300;
+      addNotification('+300 WEATHER BONUS!', '#FFD600', CW/2, CH/3);
+    }
+
+    // Consecutive excellent check
+    if (G.consecutiveExcellent >= 5) {
+      addNotification('RF WIZARD!', '#7C4DFF', CW/2, CH/2 - 40);
+      G.score += 2000;
+    }
+
+    // Mark done
+    pt.done = true;
+    G.installed++;
+
+    // Signal arc
+    G.signalArcs.push({
+      from: { x: pt.x, y: pt.y, z: pt.floors },
+      to: { x: pt.tower.x, y: pt.tower.y, z: pt.tower.height },
+      quality,
+      alpha: 1,
+    });
+
+    addNotification(`+${points} ${label}`, quality === 'excellent' ? '#00E676' : quality === 'good' ? '#FFD600' : '#FF1744',
+      isoToScreen(pt.x, pt.y, pt.floors).sx, isoToScreen(pt.x, pt.y, pt.floors).sy - 30);
+
+    // Career XP
+    G.careerXP += points;
+    if (G.careerXP >= G.careerLevel * 500 && G.careerLevel < 30) {
+      G.careerLevel++;
+      addNotification('LEVEL UP! ' + getCareerTitle(), '#00BCD4', CW/2, CH/2);
+      sfx('levelClear');
+    }
+
+    // Back to playing — auto-descend from rooftop
+    setTimeout(() => {
+      G.state = STATES.PLAYING;
+      align.locked = false;
+      tech.z = 0;
+      tech.onBuilding = null;
+      tech.state = 'idle';
+      document.getElementById('alignPanel').style.display = 'none';
+
+      // Check level complete — exclude competitor-taken points
+      const availablePoints = G.installPoints.filter(p => !p.takenByCompetitor).length;
+      if (G.installed >= availablePoints) {
+        levelComplete();
+      }
+    }, 800);
+  }
+}
+
+function renderAlignPanel() {
+  const panel = document.getElementById('alignPanel');
+  if (G.state !== STATES.ALIGNING) { panel.style.display = 'none'; return; }
+  panel.style.display = 'block';
+
+  const sigPct = Math.max(0, Math.min(100, (align.signal + 100) * 2));
+  const sigColor = align.signal >= -65 ? '#00E676' : align.signal >= -75 ? '#FFD600' : '#FF1744';
+  const sigLabel = align.signal >= -65 ? 'EXCELLENT' : align.signal >= -75 ? 'GOOD' : 'WEAK';
+
+  panel.innerHTML = `
+    <h3>ANTENNA ALIGNMENT v2.3</h3>
+    <div class="align-row"><span>Azimuth:</span><span>← ${Math.round(align.azimuth)}° →</span></div>
+    <div class="align-row"><span>Elevation:</span><span>↑ ${align.elevation > 0 ? '+' : ''}${Math.round(align.elevation)}° ↓</span></div>
+    <hr style="border-color:#00BCD4;margin:8px 0">
+    <div style="font-size:11px;color:#90A4AE">Signal Strength:</div>
+    <div class="signal-bar"><div class="signal-fill" style="width:${sigPct}%;background:${sigColor}"></div></div>
+    <div class="signal-label" style="color:${sigColor}">${Math.round(align.signal)} dBm [${sigLabel}]</div>
+    <div style="font-size:10px;color:#90A4AE;margin-top:4px">TARGET: -65 dBm or better</div>
+    <div style="text-align:center;margin-top:8px;color:#00BCD4;font-size:12px">${T('lockAntenna')}</div>
+    ${G.weather === 'wind' ? '<div style="color:#FF9800;font-size:10px;margin-top:4px">⚠ WIND INTERFERENCE</div>' : ''}
+  `;
+}
+
+// ── MODULE 9: CLIMBING MINI-GAME ──
+const climb = {
+  progress: 0,
+  target: 100,
+  zones: [],
+  currentZoneIdx: 0,
+  speed: 1,
+  targetFloors: 0,
+  buildingRef: null,
+};
+
+function startClimb(installPt) {
+  G.state = STATES.CLIMBING;
+  climb.progress = 0;
+  climb.target = installPt.floors * 20;
+  climb.targetFloors = installPt.floors;
+  climb.buildingRef = installPt;
+  climb.currentZoneIdx = 0;
+  climb.zones = [];
+  // Generate grab zones
+  const numZones = installPt.floors + 1;
+  for (let i = 0; i < numZones; i++) {
+    climb.zones.push({
+      pos: (i + 1) / (numZones + 1) * climb.target,
+      hit: false,
+      width: 8 - Math.min(G.cityIdx, 4),
+    });
+  }
+}
+
+function updateClimb() {
+  if (G.state !== STATES.CLIMBING) return;
+
+  // Auto climb slowly
+  climb.progress += 0.3 * (G.weather === 'rain' ? 0.6 : 1);
+
+  // Check space press at grab zones
+  if (justPressed('Space')) {
+    const zone = climb.zones[climb.currentZoneIdx];
+    if (zone && Math.abs(climb.progress - zone.pos) < zone.width) {
+      zone.hit = true;
+      climb.progress = zone.pos;
+      climb.currentZoneIdx++;
+      sfx('climb');
+      // Speed boost
+      climb.progress += 5;
+    } else {
+      // Miss — slip back
+      climb.progress = Math.max(0, climb.progress - 8);
+      sfx('weak');
+    }
+  }
+
+  // Complete
+  if (climb.progress >= climb.target) {
+    tech.z = climb.targetFloors;
+    tech.onBuilding = climb.buildingRef;
+    G.state = STATES.ALIGNING;
+    const pt = climb.buildingRef;
+    align.currentPoint = pt;
+    align.targetAz = pt.optimalAz;
+    align.targetEl = pt.optimalEl;
+    align.azimuth = (pt.optimalAz + 20 + Math.random() * 40) % 360;
+    align.elevation = pt.optimalEl + Math.floor(Math.random() * 16) - 8;
+    align.signal = -90;
+    align.windOffset = 0;
+    sfx('lock');
+  }
+}
+
+function drawClimbUI(ctx) {
+  if (G.state !== STATES.CLIMBING) return;
+
+  const barX = CW / 2 - 15;
+  const barY = 80;
+  const barH = CH - 180;
+  const barW = 30;
+
+  // Background
+  ctx.fillStyle = 'rgba(0,0,0,0.7)';
+  ctx.fillRect(CW/2 - 120, 60, 240, CH - 120);
+
+  // Title
+  ctx.fillStyle = '#00BCD4';
+  ctx.font = 'bold 16px Nunito, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('CLIMBING!', CW/2, barY - 10);
+  ctx.fillStyle = '#90A4AE';
+  ctx.font = '11px Space Mono, monospace';
+  ctx.fillText(T('climbPrompt'), CW/2, barY + 5);
+
+  // Vertical bar
+  ctx.fillStyle = '#263238';
+  ctx.fillRect(barX, barY + 20, barW, barH);
+
+  // Grab zones
+  climb.zones.forEach((z, i) => {
+    const zy = barY + 20 + barH - (z.pos / climb.target) * barH;
+    ctx.fillStyle = z.hit ? '#00E676' : (i === climb.currentZoneIdx ? '#FFD600' : '#455A64');
+    ctx.fillRect(barX - 4, zy - z.width, barW + 8, z.width * 2);
+    if (i === climb.currentZoneIdx && !z.hit) {
+      ctx.strokeStyle = '#FFD600';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(barX - 4, zy - z.width, barW + 8, z.width * 2);
+    }
+  });
+
+  // Climber position
+  const cy = barY + 20 + barH - (climb.progress / climb.target) * barH;
+  ctx.fillStyle = '#FF6D00';
+  ctx.beginPath();
+  ctx.arc(barX + barW/2, cy, 8, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#FFF';
+  ctx.font = 'bold 8px Nunito';
+  ctx.textAlign = 'center';
+  ctx.fillText('▲', barX + barW/2, cy + 3);
+
+  // Floor markers
+  for (let f = 1; f <= climb.targetFloors; f++) {
+    const fy = barY + 20 + barH - (f / climb.targetFloors) * barH * 0.9;
+    ctx.fillStyle = '#78909C';
+    ctx.font = '10px Space Mono';
+    ctx.textAlign = 'right';
+    ctx.fillText(`${f}F`, barX - 10, fy + 3);
+  }
+}
+
+// ── MODULE 9B: NEGOTIATION MINI-GAME ──
+const negotiate = {
+  point: null,
+  cursor: 0,       // 0-100 bouncing cursor
+  cursorDir: 1,
+  speed: 1.5,
+  sweetSpot: 50,   // center of green zone
+  sweetWidth: 20,  // width of green zone (gets smaller at higher levels)
+  attempts: 0,
+  maxAttempts: 3,
+  phase: 'bidding', // 'bidding' | 'result'
+  resultTimer: 0,
+  won: false,
+};
+
+function startNegotiation(pt) {
+  G.state = STATES.NEGOTIATING;
+  negotiate.point = pt;
+  negotiate.cursor = 0;
+  negotiate.cursorDir = 1;
+  negotiate.speed = 1.2 + G.cityIdx * 0.15;
+  negotiate.sweetSpot = 30 + Math.random() * 40;
+  negotiate.sweetWidth = Math.max(10, 25 - G.cityIdx);
+  negotiate.attempts = 0;
+  negotiate.maxAttempts = 3;
+  negotiate.phase = 'bidding';
+  negotiate.won = false;
+}
+
+function updateNegotiation() {
+  if (G.state !== STATES.NEGOTIATING) return;
+
+  if (negotiate.phase === 'result') {
+    negotiate.resultTimer -= G.dt;
+    if (negotiate.resultTimer <= 0) {
+      if (negotiate.won) {
+        // Client won back — remove competitor flag, start climb
+        negotiate.point.takenByCompetitor = null;
+        startClimb(negotiate.point);
+      } else {
+        // Failed — point stays taken, but doesn't count toward required
+        G.state = STATES.PLAYING;
+      }
+    }
+    return;
+  }
+
+  // Cursor bounces left-right
+  negotiate.cursor += negotiate.speed * negotiate.cursorDir;
+  if (negotiate.cursor >= 100) { negotiate.cursor = 100; negotiate.cursorDir = -1; }
+  if (negotiate.cursor <= 0) { negotiate.cursor = 0; negotiate.cursorDir = 1; }
+
+  if (justPressed('Space')) {
+    negotiate.attempts++;
+    const dist = Math.abs(negotiate.cursor - negotiate.sweetSpot);
+    if (dist <= negotiate.sweetWidth / 2) {
+      // Success!
+      negotiate.won = true;
+      negotiate.phase = 'result';
+      negotiate.resultTimer = 1.5;
+      sfx('excellent');
+      G.score += 500;
+      G.competitorsDefeated++;
+      addNotification('+500 CLIENT RECOVERED!', '#00E676', CW/2, CH/3);
+    } else if (negotiate.attempts >= negotiate.maxAttempts) {
+      // All attempts used — failed
+      negotiate.won = false;
+      negotiate.phase = 'result';
+      negotiate.resultTimer = 1.5;
+      sfx('weak');
+      addNotification('NEGOTIATION FAILED', '#FF1744', CW/2, CH/3);
+    } else {
+      // Miss but more attempts
+      sfx('competitor');
+      // Sweetspot shifts slightly
+      negotiate.sweetSpot = Math.max(15, Math.min(85, negotiate.sweetSpot + (Math.random() - 0.5) * 15));
+    }
+  }
+
+  if (justPressed('Escape')) {
+    G.state = STATES.PLAYING;
+  }
+}
+
+function drawNegotiationUI(ctx) {
+  if (G.state !== STATES.NEGOTIATING) return;
+
+  ctx.fillStyle = 'rgba(0,0,0,0.75)';
+  ctx.fillRect(0, 0, CW, CH);
+
+  const bx = CW/2 - 200, by = CH/2 - 120, bw = 400, bh = 240;
+  ctx.fillStyle = 'rgba(13,71,161,0.95)';
+  ctx.strokeStyle = '#00BCD4';
+  ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.roundRect(bx, by, bw, bh, 12); ctx.fill(); ctx.stroke();
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#FFD600';
+  ctx.font = 'bold 20px Nunito, sans-serif';
+  const titles = ['NEGOTIATE CLIENT', 'NEGOCIAR CLIENTE', 'NEGOCIAR CLIENTE'];
+  ctx.fillText(titles[G.lang], CW/2, by + 35);
+
+  // Competitor label
+  ctx.fillStyle = '#FF9800';
+  ctx.font = '13px Nunito, sans-serif';
+  const compName = negotiate.point.takenByCompetitor || 'COMPETITOR';
+  const msgs = [
+    `${compName} took this client. Win them back!`,
+    `${compName} tomó este cliente. ¡Recupéralo!`,
+    `${compName} tomou este cliente. Recupere-o!`,
+  ];
+  ctx.fillText(msgs[G.lang], CW/2, by + 58);
+
+  if (negotiate.phase === 'bidding') {
+    // Horizontal bar
+    const barX = bx + 40, barY = by + 90, barW = bw - 80, barH = 30;
+    ctx.fillStyle = '#263238';
+    ctx.fillRect(barX, barY, barW, barH);
+
+    // Sweet spot (green zone)
+    const ssX = barX + (negotiate.sweetSpot - negotiate.sweetWidth/2) / 100 * barW;
+    const ssW = negotiate.sweetWidth / 100 * barW;
+    ctx.fillStyle = 'rgba(0,230,118,0.4)';
+    ctx.fillRect(ssX, barY, ssW, barH);
+    ctx.strokeStyle = '#00E676';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(ssX, barY, ssW, barH);
+
+    // Labels
+    ctx.font = '9px Space Mono, monospace';
+    ctx.fillStyle = '#FF1744';
+    ctx.textAlign = 'left';
+    ctx.fillText('LOW', barX, barY - 4);
+    ctx.fillStyle = '#00E676';
+    ctx.textAlign = 'center';
+    ctx.fillText('DEAL!', ssX + ssW/2, barY - 4);
+    ctx.fillStyle = '#FF1744';
+    ctx.textAlign = 'right';
+    ctx.fillText('HIGH', barX + barW, barY - 4);
+
+    // Moving cursor
+    const curX = barX + (negotiate.cursor / 100) * barW;
+    ctx.fillStyle = '#FFD600';
+    ctx.beginPath();
+    ctx.moveTo(curX - 6, barY + barH + 4);
+    ctx.lineTo(curX + 6, barY + barH + 4);
+    ctx.lineTo(curX, barY + barH - 2);
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillRect(curX - 2, barY, 4, barH);
+
+    // Attempts left
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#FFF';
+    ctx.font = 'bold 14px Nunito, sans-serif';
+    const attemptLabels = ['Attempts left:', 'Intentos:', 'Tentativas:'];
+    ctx.fillText(`${attemptLabels[G.lang]} ${negotiate.maxAttempts - negotiate.attempts}`, CW/2, by + 155);
+
+    // Offer label
+    ctx.fillStyle = '#00BCD4';
+    ctx.font = '13px Nunito, sans-serif';
+    const offerLabels = ['Press SPACE to make your offer!', '¡Presiona ESPACIO para hacer tu oferta!', 'Pressione ESPAÇO para fazer sua oferta!'];
+    ctx.fillText(offerLabels[G.lang], CW/2, by + 180);
+
+    // Hint: what you're offering
+    const offer = Math.round(negotiate.cursor);
+    const offerTexts = [`Speed: ${offer} Mbps / Price: $${(50 - offer * 0.3).toFixed(0)}/mo`, `Velocidad: ${offer} Mbps / Precio: $${(50 - offer * 0.3).toFixed(0)}/mes`, `Velocidade: ${offer} Mbps / Preço: R$${(50 - offer * 0.3).toFixed(0)}/mês`];
+    ctx.fillStyle = '#90A4AE';
+    ctx.font = '11px Space Mono, monospace';
+    ctx.fillText(offerTexts[G.lang], CW/2, by + 200);
+  } else {
+    // Result
+    ctx.font = 'bold 28px Nunito, sans-serif';
+    if (negotiate.won) {
+      ctx.fillStyle = '#00E676';
+      const wins = ['CLIENT WON BACK!', '¡CLIENTE RECUPERADO!', 'CLIENTE RECUPERADO!'];
+      ctx.fillText(wins[G.lang], CW/2, by + 120);
+      ctx.font = '14px Nunito';
+      ctx.fillStyle = '#FFF';
+      const cont = ['Proceeding to install...', 'Procediendo a instalar...', 'Prosseguindo para instalar...'];
+      ctx.fillText(cont[G.lang], CW/2, by + 155);
+    } else {
+      ctx.fillStyle = '#FF1744';
+      const loses = ['CLIENT LOST', 'CLIENTE PERDIDO', 'CLIENTE PERDIDO'];
+      ctx.fillText(loses[G.lang], CW/2, by + 120);
+      ctx.font = '14px Nunito';
+      ctx.fillStyle = '#FF9800';
+      const retry = ['You can try again later', 'Puedes intentar de nuevo', 'Você pode tentar novamente'];
+      ctx.fillText(retry[G.lang], CW/2, by + 155);
+    }
+  }
+
+  // ESC to cancel
+  ctx.fillStyle = '#546E7A';
+  ctx.font = '11px Nunito';
+  ctx.textAlign = 'center';
+  ctx.fillText('ESC: ' + T('back'), CW/2, by + bh - 10);
+}
+
+// ── MODULE 10: OBSTACLES ──
+function spawnWeather() {
+  const city = CITY_DATA[G.cityIdx];
+  if (Math.random() > city.weatherChance) return;
+  const types = ['rain', 'wind'];
+  if (G.cityIdx >= 5) types.push('lightning');
+  if (G.cityIdx === 0 || G.cityIdx === 5) types.push('heat');
+  G.weather = types[Math.floor(Math.random() * types.length)];
+  G.weatherTimer = 15 + Math.random() * 20;
+  if (G.weather === 'rain') sfx('rain');
+  if (G.weather === 'wind') sfx('wind');
+}
+
+function updateWeather() {
+  if (!G.weather) return;
+  G.weatherTimer -= G.dt;
+  if (G.weatherTimer <= 0) {
+    G.weather = null;
+  }
+  // Lightning strike
+  if (G.weather === 'lightning' && Math.random() < 0.003) {
+    G.flash = 1;
+    G.shakeTimer = 0.3;
+    G.shakeIntensity = 6;
+    sfx('thunder');
+    if (tech.z > 0) {
+      G.lives--;
+      G.score = Math.max(0, G.score - 200);
+      addNotification('-200 LIGHTNING!', '#FF1744', CW/2, CH/3);
+      if (G.lives <= 0) gameOver();
+    }
+  }
+}
+
+function drawWeather(ctx) {
+  if (G.weather === 'rain') {
+    ctx.strokeStyle = 'rgba(100,181,246,0.4)';
+    ctx.lineWidth = 1;
+    for (let i = 0; i < 80; i++) {
+      const rx = (performance.now() * 0.3 + i * 47) % CW;
+      const ry = (performance.now() * 0.8 + i * 31) % CH;
+      ctx.beginPath();
+      ctx.moveTo(rx, ry);
+      ctx.lineTo(rx - 2, ry + 8);
+      ctx.stroke();
+    }
+  }
+  if (G.weather === 'wind') {
+    ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+    ctx.lineWidth = 1;
+    for (let i = 0; i < 20; i++) {
+      const wx = (performance.now() * 0.5 + i * 97) % (CW + 100) - 50;
+      const wy = 100 + i * 25;
+      ctx.beginPath();
+      ctx.moveTo(wx, wy);
+      ctx.lineTo(wx + 30 + Math.sin(performance.now()/500 + i) * 10, wy);
+      ctx.stroke();
+    }
+  }
+  if (G.weather === 'heat') {
+    for (let i = 0; i < 10; i++) {
+      const hx = i * 100;
+      const hy = CH - 50 + Math.sin(performance.now()/300 + i) * 5;
+      ctx.fillStyle = 'rgba(255,152,0,0.05)';
+      ctx.fillRect(hx, hy - 100, 100, 100);
+    }
+  }
+  // Flash
+  if (G.flash > 0) {
+    ctx.fillStyle = `rgba(255,255,255,${G.flash})`;
+    ctx.fillRect(0, 0, CW, CH);
+    G.flash -= G.dt * 4;
+  }
+}
+
+// Competitors
+function spawnCompetitors(mapData) {
+  G.competitors = [];
+  if (G.cityIdx < 1) return; // No competitors in first city first levels
+  const numComp = Math.min(Math.floor(G.cityIdx / 2) + 1, 3);
+  for (let i = 0; i < numComp; i++) {
+    const target = mapData.installPts[Math.floor(Math.random() * mapData.installPts.length)];
+    if (!target) continue;
+    const edge = Math.random() > 0.5 ? { x: 0, y: Math.floor(Math.random() * mapData.size) } : { x: Math.floor(Math.random() * mapData.size), y: 0 };
+    G.competitors.push({
+      x: edge.x, y: edge.y,
+      targetPt: target,
+      speed: 0.8 + G.cityIdx * 0.1,
+      type: ['CABLE_VAN', 'FIBER_CREW', 'JAMMER'][i % 3],
+      active: true,
+      arriveTimer: 0,
+    });
+  }
+}
+
+function updateCompetitors() {
+  G.competitors.forEach(comp => {
+    if (!comp.active || comp.targetPt.done) return;
+    const dx = comp.targetPt.x - comp.x;
+    const dy = comp.targetPt.y - comp.y;
+    const dist = Math.sqrt(dx*dx + dy*dy);
+    if (dist < 0.5) {
+      comp.arriveTimer += G.dt;
+      if (comp.arriveTimer > 8) {
+        // Competitor claims the point — can be recovered via negotiation
+        comp.targetPt.takenByCompetitor = comp.type;
+        comp.targetPt.negotiateTimer = 0;
+        comp.active = false;
+        G.score = Math.max(0, G.score - 100);
+        addNotification('-100 COMPETITOR!', '#FF1744',
+          isoToScreen(comp.targetPt.x, comp.targetPt.y).sx,
+          isoToScreen(comp.targetPt.x, comp.targetPt.y).sy);
+        sfx('competitor');
+      }
+    } else {
+      comp.x += (dx / dist) * comp.speed * G.dt;
+      comp.y += (dy / dist) * comp.speed * G.dt;
+    }
+  });
+}
+
+function drawCompetitors(ctx) {
+  G.competitors.forEach(comp => {
+    if (!comp.active) return;
+    const pos = isoToScreen(comp.x, comp.y);
+    // Van body
+    ctx.fillStyle = comp.type === 'CABLE_VAN' ? '#1565C0' : comp.type === 'FIBER_CREW' ? '#F57F17' : '#B71C1C';
+    ctx.fillRect(pos.sx - 10, pos.sy - 6, 20, 12);
+    ctx.fillStyle = '#FFF';
+    ctx.font = 'bold 6px Nunito';
+    ctx.textAlign = 'center';
+    ctx.fillText(comp.type === 'CABLE_VAN' ? 'CABLE' : comp.type === 'FIBER_CREW' ? 'FIBER' : 'JAM', pos.sx, pos.sy + 2);
+    // Warning indicator toward target
+    if (comp.arriveTimer > 0) {
+      ctx.fillStyle = '#FF1744';
+      ctx.font = 'bold 14px Nunito';
+      ctx.fillText('⚠', pos.sx, pos.sy - 14);
+    }
+  });
+}
+
+// ── MODULE 11: PARTICLES & NOTIFICATIONS ──
+function addNotification(text, color, x, y) {
+  G.notifications.push({ text, color, x, y, life: 2, vy: -1 });
+}
+
+function addParticle(x, y, color, count = 5) {
+  for (let i = 0; i < count; i++) {
+    G.particles.push({
+      x, y,
+      vx: (Math.random() - 0.5) * 4,
+      vy: -Math.random() * 3 - 1,
+      color,
+      life: 0.5 + Math.random() * 0.5,
+      size: 2 + Math.random() * 3,
+    });
+  }
+}
+
+function updateParticles() {
+  G.particles = G.particles.filter(p => {
+    p.x += p.vx;
+    p.y += p.vy;
+    p.vy += 3 * G.dt;
+    p.life -= G.dt;
+    return p.life > 0;
+  });
+  G.notifications = G.notifications.filter(n => {
+    n.y += n.vy;
+    n.life -= G.dt;
+    return n.life > 0;
+  });
+}
+
+function drawParticles(ctx) {
+  G.particles.forEach(p => {
+    ctx.globalAlpha = Math.min(1, p.life * 2);
+    ctx.fillStyle = p.color;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+    ctx.fill();
+  });
+  ctx.globalAlpha = 1;
+
+  G.notifications.forEach(n => {
+    ctx.globalAlpha = Math.min(1, n.life);
+    ctx.fillStyle = n.color;
+    ctx.font = 'bold 16px Nunito, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.strokeStyle = '#000';
+    ctx.lineWidth = 3;
+    ctx.strokeText(n.text, n.x, n.y);
+    ctx.fillText(n.text, n.x, n.y);
+  });
+  ctx.globalAlpha = 1;
+}
+
+// ── MODULE 12: SIGNAL ARCS ──
+function drawSignalArcs(ctx) {
+  G.signalArcs.forEach(arc => {
+    const from = isoToScreen(arc.from.x, arc.from.y, arc.from.z);
+    const to = isoToScreen(arc.to.x, arc.to.y, arc.to.z);
+    const color = arc.quality === 'excellent' ? '#00E676' : arc.quality === 'good' ? '#FFD600' : '#FF1744';
+
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    ctx.setLineDash([4, 4]);
+    ctx.globalAlpha = 0.7;
+    ctx.beginPath();
+    ctx.moveTo(from.sx, from.sy);
+    // Curved arc
+    const midX = (from.sx + to.sx) / 2;
+    const midY = Math.min(from.sy, to.sy) - 30;
+    ctx.quadraticCurveTo(midX, midY, to.sx, to.sy);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.globalAlpha = 1;
+
+    // Signal waves at from point
+    const waveT = performance.now() / 500;
+    for (let w = 0; w < 3; w++) {
+      const r = 5 + ((waveT + w * 0.3) % 1) * 15;
+      ctx.strokeStyle = color;
+      ctx.globalAlpha = 1 - ((waveT + w * 0.3) % 1);
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.arc(from.sx, from.sy - 5, r, -Math.PI * 0.7, -Math.PI * 0.3);
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+  });
+}
+
+// ── MODULE 13: LEVEL MANAGEMENT ──
+let currentMap = null;
+
+function startLevel(cityIdx, levelInCity) {
+  G.cityIdx = cityIdx;
+  G.levelInCity = levelInCity;
+  G.level = CITY_DATA[cityIdx].levels[levelInCity] || cityIdx * 3 + levelInCity + 1;
+  currentMap = generateMap(cityIdx, levelInCity);
+  G.state = STATES.PLAYING;
+  G.installed = 0;
+  G.required = currentMap.installPts.length;
+  G.signalArcs = [];
+  G.particles = [];
+  G.notifications = [];
+  G.weather = null;
+  G.competitors = [];
+  G.timer = 60 + 30 * (3 - Math.min(levelInCity, 2)) - cityIdx * 2;
+  G.timerMax = G.timer;
+  G.shakeTimer = 0;
+  G.flash = 0;
+  G.installPoints = currentMap.installPts;
+  G.towers = currentMap.towers;
+  G.buildings = currentMap.buildings;
+
+  // Place technician on a road tile
+  tech.x = Math.floor(currentMap.size / 2);
+  tech.y = 0;
+  tech.z = 0;
+  tech.state = 'idle';
+  tech.onBuilding = null;
+
+  // Center camera
+  G.camera.x = 0;
+  G.camera.y = 0;
+  G.rotation = 0;
+
+  spawnCompetitors(currentMap);
+  startBGM(cityIdx);
+
+  // Weather after delay
+  setTimeout(() => { if (G.state === STATES.PLAYING) spawnWeather(); }, 5000 + Math.random() * 10000);
+}
+
+function levelComplete() {
+  G.state = STATES.LEVEL_CLEAR;
+  G.levelClearTimer = 4;
+  stopBGM();
+  sfx('levelClear');
+
+  // Time bonus
+  const timeBonus = Math.floor(G.timer) * 50;
+  G.score += 2000 + timeBonus;
+
+  // All excellent bonus
+  const allExcellent = G.signalArcs.every(a => a.quality === 'excellent');
+  if (allExcellent && G.signalArcs.length > 0) {
+    G.score += 3000;
+    addNotification('+3000 ALL EXCELLENT!', '#00E676', CW/2, CH/3);
+  }
+
+  addNotification(`+${2000 + timeBonus} ${T('levelClear')}`, '#00E676', CW/2, CH/2);
+
+  // Unlock next city
+  const cityLevels = CITY_DATA[G.cityIdx].levels;
+  const levelInCity = cityLevels.indexOf(G.level);
+  if (levelInCity === cityLevels.length - 1 && G.cityIdx < 9) {
+    G.unlockedCities[G.cityIdx + 1] = true;
+  }
+  G.cityStars[G.cityIdx] = Math.max(G.cityStars[G.cityIdx], levelInCity + 1);
+
+  // Update hi score
+  G.hiScore = Math.max(G.hiScore, G.score);
+
+  // Save
+  saveGame();
+
+  // Particles celebration
+  for (let i = 0; i < 30; i++) {
+    addParticle(CW/2 + (Math.random()-0.5)*200, CH/2, ['#FFD600','#00E676','#00BCD4','#FF6D00'][Math.floor(Math.random()*4)], 1);
+  }
+}
+
+function gameOver() {
+  G.state = STATES.GAME_OVER;
+  G.gameOverTimer = 4;
+  stopBGM();
+  sfx('gameOver');
+  G.hiScore = Math.max(G.hiScore, G.score);
+  saveGame();
+}
+
+// ── MODULE 14: SAVE SYSTEM ──
+function saveGame() {
+  const data = {
+    hiScore: G.hiScore,
+    careerLevel: G.careerLevel,
+    careerXP: G.careerXP,
+    unlockedCities: G.unlockedCities,
+    cityStars: G.cityStars,
+    savedLevel: G.level,
+    lang: G.lang,
+  };
+  localStorage.setItem('wisprunner_save', JSON.stringify(data));
+}
+
+function loadGame() {
+  try {
+    const data = JSON.parse(localStorage.getItem('wisprunner_save'));
+    if (data) {
+      G.hiScore = data.hiScore || 0;
+      G.careerLevel = data.careerLevel || 1;
+      G.careerXP = data.careerXP || 0;
+      G.unlockedCities = data.unlockedCities || [true,false,false,false,false,false,false,false,false,false];
+      G.cityStars = data.cityStars || [0,0,0,0,0,0,0,0,0,0];
+      G.savedLevel = data.savedLevel || 0;
+      G.lang = data.lang ?? LANG.ES;
+    }
+  } catch(e) {}
+}
+
+// ── MODULE 15: RENDERING ──
+function drawSky(ctx, cityIdx) {
+  const city = CITY_DATA[cityIdx] || CITY_DATA[0];
+  const grad = ctx.createLinearGradient(0, 0, 0, CH);
+  grad.addColorStop(0, city.sky);
+  grad.addColorStop(1, city.ambient);
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, CW, CH);
+
+  // Clouds
+  ctx.fillStyle = 'rgba(255,255,255,0.3)';
+  for (let i = 0; i < 5; i++) {
+    const cx = ((performance.now() * 0.02 + i * 200) % (CW + 200)) - 100;
+    const cy = 30 + i * 20;
+    ctx.beginPath();
+    ctx.ellipse(cx, cy, 40 + i * 5, 12, 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // City-specific landmarks (background silhouettes)
+  drawCityLandmarks(ctx, cityIdx);
+}
+
+function drawCityLandmarks(ctx, cityIdx) {
+  const t = performance.now() / 1000;
+  ctx.save();
+
+  switch(cityIdx) {
+    case 0: // Monterrey — Cerro de la Silla + Faro del Comercio + mountains
+      // Sierra Madre mountains background
+      ctx.fillStyle = '#7986CB';
+      ctx.globalAlpha = 0.3;
+      ctx.beginPath();
+      ctx.moveTo(0, 200);
+      ctx.lineTo(80, 100); ctx.lineTo(160, 140); ctx.lineTo(250, 60);
+      ctx.lineTo(340, 110); ctx.lineTo(420, 80); ctx.lineTo(500, 130);
+      ctx.lineTo(580, 50); ctx.lineTo(660, 100); ctx.lineTo(750, 70);
+      ctx.lineTo(850, 120); ctx.lineTo(960, 90); ctx.lineTo(960, 200);
+      ctx.closePath(); ctx.fill();
+      // Cerro de la Silla (iconic saddle mountain)
+      ctx.fillStyle = '#5C6BC0';
+      ctx.globalAlpha = 0.4;
+      ctx.beginPath();
+      ctx.moveTo(600, 200);
+      ctx.lineTo(680, 90); ctx.lineTo(720, 110); // saddle dip
+      ctx.lineTo(780, 60); // right peak
+      ctx.lineTo(850, 130); ctx.lineTo(900, 200);
+      ctx.closePath(); ctx.fill();
+      // Closer mountains
+      ctx.fillStyle = '#3F51B5';
+      ctx.globalAlpha = 0.25;
+      ctx.beginPath();
+      ctx.moveTo(0, 220);
+      ctx.lineTo(100, 150); ctx.lineTo(200, 180); ctx.lineTo(300, 130);
+      ctx.lineTo(400, 170); ctx.lineTo(500, 160); ctx.lineTo(600, 200);
+      ctx.lineTo(960, 220);
+      ctx.closePath(); ctx.fill();
+      // Faro del Comercio (orange laser beacon)
+      ctx.globalAlpha = 0.6;
+      ctx.fillStyle = '#BF360C';
+      ctx.fillRect(120, 80, 6, 120); // tall orange column
+      ctx.fillStyle = '#FF6D00';
+      ctx.fillRect(118, 76, 10, 8); // top
+      // Laser beam rotating
+      ctx.strokeStyle = '#00E676';
+      ctx.globalAlpha = 0.15 + Math.sin(t * 2) * 0.1;
+      ctx.lineWidth = 2;
+      const laserAngle = t * 0.8;
+      ctx.beginPath();
+      ctx.moveTo(123, 80);
+      ctx.lineTo(123 + Math.cos(laserAngle) * 300, 80 + Math.sin(laserAngle) * 60 - 40);
+      ctx.stroke();
+      ctx.globalAlpha = 0.15 + Math.cos(t * 2) * 0.1;
+      ctx.beginPath();
+      ctx.moveTo(123, 80);
+      ctx.lineTo(123 + Math.cos(laserAngle + Math.PI) * 300, 80 + Math.sin(laserAngle + Math.PI) * 60 - 40);
+      ctx.stroke();
+      break;
+
+    case 1: // CDMX — Ángel de la Independencia + mountains + smog
+      // Valley mountains
+      ctx.fillStyle = '#78909C';
+      ctx.globalAlpha = 0.2;
+      ctx.beginPath();
+      ctx.moveTo(0, 180); ctx.lineTo(120, 100); ctx.lineTo(250, 130);
+      ctx.lineTo(400, 80); ctx.lineTo(550, 120); ctx.lineTo(700, 70);
+      ctx.lineTo(850, 110); ctx.lineTo(960, 150); ctx.lineTo(960, 200);
+      ctx.lineTo(0, 200);
+      ctx.closePath(); ctx.fill();
+      // Smog layer
+      ctx.fillStyle = '#90A4AE';
+      ctx.globalAlpha = 0.15;
+      ctx.fillRect(0, 140, CW, 40);
+      // Ángel de la Independencia
+      ctx.globalAlpha = 0.5;
+      ctx.fillStyle = '#546E7A';
+      ctx.fillRect(83, 100, 4, 80); // column
+      ctx.fillStyle = '#FFD600';
+      // Winged victory
+      ctx.beginPath();
+      ctx.moveTo(85, 100); ctx.lineTo(75, 90); ctx.lineTo(85, 80);
+      ctx.lineTo(95, 90); ctx.lineTo(85, 100);
+      ctx.closePath(); ctx.fill();
+      // Wings
+      ctx.beginPath();
+      ctx.moveTo(75, 88); ctx.lineTo(65, 78); ctx.lineTo(78, 86); ctx.closePath(); ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(95, 88); ctx.lineTo(105, 78); ctx.lineTo(92, 86); ctx.closePath(); ctx.fill();
+      // Monumento a la Revolución dome
+      ctx.fillStyle = '#607D8B';
+      ctx.globalAlpha = 0.35;
+      ctx.beginPath();
+      ctx.arc(850, 155, 30, Math.PI, 0); ctx.fill(); // dome
+      ctx.fillRect(825, 155, 50, 30); // base
+      ctx.fillRect(820, 155, 8, 30); ctx.fillRect(862, 155, 8, 30); // pillars
+      break;
+
+    case 2: // Guadalajara — Cathedral twin spires + Minerva
+      // Catedral de Guadalajara (yellow twin towers)
+      ctx.globalAlpha = 0.45;
+      ctx.fillStyle = '#F9A825';
+      ctx.fillRect(80, 110, 12, 70); // left tower
+      ctx.fillRect(108, 110, 12, 70); // right tower
+      ctx.fillStyle = '#F57F17';
+      // Spires (pointy tops)
+      ctx.beginPath(); ctx.moveTo(80, 110); ctx.lineTo(86, 75); ctx.lineTo(92, 110); ctx.closePath(); ctx.fill();
+      ctx.beginPath(); ctx.moveTo(108, 110); ctx.lineTo(114, 75); ctx.lineTo(120, 110); ctx.closePath(); ctx.fill();
+      // Nave between towers
+      ctx.fillStyle = '#FBC02D';
+      ctx.fillRect(92, 130, 16, 50);
+      // Minerva monument
+      ctx.globalAlpha = 0.4;
+      ctx.fillStyle = '#78909C';
+      ctx.fillRect(820, 150, 4, 30); // pedestal
+      ctx.fillStyle = '#B0BEC5';
+      ctx.beginPath();
+      ctx.arc(822, 148, 6, 0, Math.PI * 2); ctx.fill(); // head
+      // Spear
+      ctx.strokeStyle = '#90A4AE';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.moveTo(822, 142); ctx.lineTo(822, 125); ctx.stroke();
+      // Fountain circle
+      ctx.strokeStyle = 'rgba(100,181,246,0.3)';
+      ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(822, 175, 20, 0, Math.PI * 2); ctx.stroke();
+      break;
+
+    case 3: // Rio de Janeiro — Cristo Redentor + Pão de Açúcar + beach
+      // Mountains/hills
+      ctx.fillStyle = '#2E7D32';
+      ctx.globalAlpha = 0.3;
+      ctx.beginPath();
+      ctx.moveTo(0, 200); ctx.lineTo(100, 120); ctx.lineTo(200, 160);
+      ctx.lineTo(350, 90); ctx.lineTo(500, 150); ctx.lineTo(650, 100);
+      ctx.lineTo(800, 170); ctx.lineTo(960, 140); ctx.lineTo(960, 200);
+      ctx.closePath(); ctx.fill();
+      // Pão de Açúcar (Sugarloaf)
+      ctx.fillStyle = '#4E342E';
+      ctx.globalAlpha = 0.4;
+      ctx.beginPath();
+      ctx.moveTo(800, 200); ctx.quadraticCurveTo(830, 70, 860, 200);
+      ctx.closePath(); ctx.fill();
+      // Cable car line
+      ctx.strokeStyle = '#546E7A';
+      ctx.globalAlpha = 0.3;
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(780, 150); ctx.lineTo(830, 90); ctx.stroke();
+      // Cable car
+      ctx.fillStyle = '#F44336';
+      ctx.globalAlpha = 0.4;
+      const carX = 800 + Math.sin(t * 0.3) * 15;
+      ctx.fillRect(carX, 115 + Math.sin(t * 0.3) * 10, 8, 6);
+      // Corcovado mountain + Cristo Redentor
+      ctx.fillStyle = '#1B5E20';
+      ctx.globalAlpha = 0.35;
+      ctx.beginPath();
+      ctx.moveTo(80, 200); ctx.quadraticCurveTo(130, 60, 180, 200);
+      ctx.closePath(); ctx.fill();
+      // Christ the Redeemer
+      ctx.fillStyle = '#ECEFF1';
+      ctx.globalAlpha = 0.6;
+      ctx.fillRect(128, 72, 4, 18); // body
+      // Arms outstretched
+      ctx.fillRect(108, 75, 44, 3);
+      // Head
+      ctx.beginPath(); ctx.arc(130, 70, 4, 0, Math.PI * 2); ctx.fill();
+      // Ocean
+      ctx.fillStyle = '#0288D1';
+      ctx.globalAlpha = 0.08;
+      ctx.fillRect(0, CH - 50, CW, 50);
+      break;
+
+    case 4: // São Paulo — Ponte Octávio Frias + MASP + dense skyline
+      // Dense skyline silhouette
+      ctx.fillStyle = '#455A64';
+      ctx.globalAlpha = 0.2;
+      for (let i = 0; i < 20; i++) {
+        const bx = i * 50; const bh = 40 + (i * 17 % 60);
+        ctx.fillRect(bx, 200 - bh, 35, bh);
+      }
+      // Ponte Octávio Frias (X-shaped cable bridge)
+      ctx.globalAlpha = 0.4;
+      ctx.strokeStyle = '#B0BEC5';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(700, 200); ctx.lineTo(750, 80); ctx.lineTo(800, 200); // tower
+      ctx.stroke();
+      // Cables
+      ctx.lineWidth = 0.8;
+      ctx.globalAlpha = 0.3;
+      for (let c = 0; c < 6; c++) {
+        ctx.beginPath();
+        ctx.moveTo(750, 80 + c * 5);
+        ctx.lineTo(710 + c * 5, 200);
+        ctx.moveTo(750, 80 + c * 5);
+        ctx.lineTo(790 - c * 5, 200);
+        ctx.stroke();
+      }
+      // MASP (red pillars suspending box)
+      ctx.globalAlpha = 0.4;
+      ctx.fillStyle = '#C62828';
+      ctx.fillRect(100, 155, 6, 30); ctx.fillRect(164, 155, 6, 30); // red pillars
+      ctx.fillStyle = '#78909C';
+      ctx.fillRect(95, 145, 80, 12); // suspended box
+      break;
+
+    case 5: // Dallas — Reunion Tower + Margaret Hunt Hill Bridge + flat plains
+      // Flat plains
+      ctx.fillStyle = '#8D6E63';
+      ctx.globalAlpha = 0.1;
+      ctx.fillRect(0, 190, CW, 20);
+      // Reunion Tower (ball on stick)
+      ctx.globalAlpha = 0.5;
+      ctx.fillStyle = '#546E7A';
+      ctx.fillRect(118, 90, 4, 100); // shaft
+      ctx.fillStyle = '#B0BEC5';
+      ctx.beginPath(); ctx.arc(120, 85, 16, 0, Math.PI * 2); ctx.fill(); // geodesic ball
+      // LED dots on ball
+      ctx.fillStyle = '#FFD600';
+      ctx.globalAlpha = 0.4;
+      for (let d = 0; d < 8; d++) {
+        const da = d / 8 * Math.PI * 2 + t;
+        ctx.beginPath();
+        ctx.arc(120 + Math.cos(da) * 12, 85 + Math.sin(da) * 12, 1.5, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      // Margaret Hunt Hill Bridge (arch with cables)
+      ctx.globalAlpha = 0.35;
+      ctx.strokeStyle = '#ECEFF1';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(720, 190);
+      ctx.quadraticCurveTo(790, 80, 860, 190); // main arch
+      ctx.stroke();
+      ctx.lineWidth = 0.7;
+      for (let c = 0; c < 8; c++) {
+        const cx = 735 + c * 15;
+        ctx.beginPath();
+        ctx.moveTo(cx, 190);
+        const archY = 190 - 110 * Math.sin(((cx - 720) / 140) * Math.PI);
+        ctx.lineTo(cx, archY);
+        ctx.stroke();
+      }
+      // Texas sun
+      ctx.fillStyle = '#FFD600';
+      ctx.globalAlpha = 0.15;
+      ctx.beginPath(); ctx.arc(CW - 80, 60, 35, 0, Math.PI * 2); ctx.fill();
+      break;
+
+    case 6: // Bogotá — Monserrate + Andes mountains + altitude
+      // Andes mountains (tall, dramatic)
+      ctx.fillStyle = '#37474F';
+      ctx.globalAlpha = 0.35;
+      ctx.beginPath();
+      ctx.moveTo(0, 200);
+      ctx.lineTo(60, 50); ctx.lineTo(130, 120); ctx.lineTo(200, 30);
+      ctx.lineTo(300, 90); ctx.lineTo(400, 40); ctx.lineTo(500, 100);
+      ctx.lineTo(600, 20); ctx.lineTo(700, 80); ctx.lineTo(800, 50);
+      ctx.lineTo(900, 100); ctx.lineTo(960, 60); ctx.lineTo(960, 200);
+      ctx.closePath(); ctx.fill();
+      // Closer range
+      ctx.fillStyle = '#263238';
+      ctx.globalAlpha = 0.25;
+      ctx.beginPath();
+      ctx.moveTo(0, 200); ctx.lineTo(100, 110); ctx.lineTo(200, 150);
+      ctx.lineTo(350, 90); ctx.lineTo(500, 140); ctx.lineTo(650, 100);
+      ctx.lineTo(800, 160); ctx.lineTo(960, 120); ctx.lineTo(960, 200);
+      ctx.closePath(); ctx.fill();
+      // Monserrate church on mountain peak
+      ctx.globalAlpha = 0.5;
+      ctx.fillStyle = '#455A64';
+      ctx.beginPath();
+      ctx.moveTo(550, 200); ctx.quadraticCurveTo(600, 30, 650, 200);
+      ctx.closePath(); ctx.fill();
+      // White church
+      ctx.fillStyle = '#ECEFF1';
+      ctx.fillRect(593, 45, 14, 15); // church body
+      ctx.beginPath(); ctx.moveTo(593, 45); ctx.lineTo(600, 35); ctx.lineTo(607, 45); ctx.closePath(); ctx.fill(); // roof
+      ctx.fillRect(598, 30, 4, 8); // cross/tower
+      // Cable car line to Monserrate
+      ctx.strokeStyle = '#78909C';
+      ctx.globalAlpha = 0.2;
+      ctx.lineWidth = 0.8;
+      ctx.beginPath(); ctx.moveTo(550, 190); ctx.lineTo(598, 55); ctx.stroke();
+      break;
+
+    case 7: // Buenos Aires — Obelisco + Casa Rosada + colorful La Boca
+      // Flat horizon (pampas)
+      ctx.fillStyle = '#C5CAE9';
+      ctx.globalAlpha = 0.1;
+      ctx.fillRect(0, 185, CW, 15);
+      // El Obelisco
+      ctx.globalAlpha = 0.5;
+      ctx.fillStyle = '#ECEFF1';
+      ctx.beginPath();
+      ctx.moveTo(130, 200); ctx.lineTo(125, 65); ctx.lineTo(128, 55);
+      ctx.lineTo(132, 55); ctx.lineTo(135, 65); ctx.lineTo(130, 200);
+      ctx.closePath(); ctx.fill();
+      ctx.strokeStyle = '#B0BEC5';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      // Casa Rosada (pink building)
+      ctx.globalAlpha = 0.35;
+      ctx.fillStyle = '#E91E63';
+      ctx.fillRect(770, 140, 70, 45);
+      ctx.fillStyle = '#EC407A';
+      ctx.fillRect(780, 135, 50, 8); // top cornice
+      // Windows
+      ctx.fillStyle = 'rgba(255,255,255,0.4)';
+      for (let w = 0; w < 5; w++) ctx.fillRect(778 + w * 12, 150, 6, 8);
+      for (let w = 0; w < 5; w++) ctx.fillRect(778 + w * 12, 165, 6, 8);
+      // Arch
+      ctx.fillStyle = '#AD1457';
+      ctx.beginPath(); ctx.arc(805, 185, 8, Math.PI, 0); ctx.fill();
+      // La Boca colorful buildings (far background)
+      ctx.globalAlpha = 0.2;
+      const bocaColors = ['#F44336','#FFD600','#2196F3','#4CAF50','#FF9800','#E91E63'];
+      for (let b = 0; b < 6; b++) {
+        ctx.fillStyle = bocaColors[b];
+        ctx.fillRect(380 + b * 18, 170 - (b%3) * 5, 16, 20 + (b%3) * 5);
+      }
+      break;
+
+    case 8: // Miami — Palm trees + Art Deco + ocean + Freedom Tower
+      // Ocean background
+      ctx.fillStyle = '#00ACC1';
+      ctx.globalAlpha = 0.1;
+      ctx.fillRect(0, 180, CW, 30);
+      // Waves
+      ctx.strokeStyle = '#00BCD4';
+      ctx.globalAlpha = 0.08;
+      ctx.lineWidth = 1;
+      for (let w = 0; w < 8; w++) {
+        ctx.beginPath();
+        for (let x = 0; x < CW; x += 20) {
+          ctx.lineTo(x, 188 + w * 3 + Math.sin(x * 0.05 + t + w) * 2);
+        }
+        ctx.stroke();
+      }
+      // Palm trees
+      ctx.globalAlpha = 0.3;
+      [50, 180, 880, 920].forEach(px => {
+        // Trunk
+        ctx.strokeStyle = '#5D4037';
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(px, 200);
+        ctx.quadraticCurveTo(px + 5, 140, px + 2, 100);
+        ctx.stroke();
+        // Fronds
+        ctx.strokeStyle = '#2E7D32';
+        ctx.lineWidth = 2;
+        for (let f = 0; f < 5; f++) {
+          const fa = (f / 5) * Math.PI * 1.5 - Math.PI * 0.5 + Math.sin(t + f) * 0.1;
+          ctx.beginPath();
+          ctx.moveTo(px + 2, 100);
+          ctx.quadraticCurveTo(
+            px + 2 + Math.cos(fa) * 20, 100 + Math.sin(fa) * 15,
+            px + 2 + Math.cos(fa) * 35, 100 + Math.sin(fa) * 25
+          );
+          ctx.stroke();
+        }
+      });
+      // Art Deco buildings (pastel)
+      ctx.globalAlpha = 0.25;
+      const decoColors = ['#F8BBD0','#B3E5FC','#C8E6C9','#FFF9C4','#D1C4E9'];
+      for (let d = 0; d < 5; d++) {
+        ctx.fillStyle = decoColors[d];
+        const dx = 350 + d * 45;
+        ctx.fillRect(dx, 150 - d * 3, 35, 45 + d * 3);
+        // Deco stripe
+        ctx.fillStyle = 'rgba(255,255,255,0.3)';
+        ctx.fillRect(dx, 150 - d * 3, 35, 3);
+        ctx.fillRect(dx, 155 - d * 3, 35, 2);
+      }
+      // Freedom Tower
+      ctx.globalAlpha = 0.35;
+      ctx.fillStyle = '#FFCC80';
+      ctx.fillRect(700, 100, 16, 85);
+      // Ornate top
+      ctx.fillStyle = '#FFB74D';
+      ctx.beginPath();
+      ctx.moveTo(700, 100); ctx.lineTo(708, 75); ctx.lineTo(716, 100);
+      ctx.closePath(); ctx.fill();
+      ctx.fillRect(705, 70, 6, 10);
+      break;
+
+    case 9: // Grand Finale — Night sky + all city silhouettes small
+      // Stars
+      ctx.fillStyle = '#FFF';
+      ctx.globalAlpha = 0.4;
+      for (let s = 0; s < 40; s++) {
+        const sx = (s * 73 + 50) % CW;
+        const sy = (s * 31 + 10) % 150;
+        ctx.globalAlpha = 0.2 + Math.sin(t * 2 + s) * 0.15;
+        ctx.fillRect(sx, sy, 1.5, 1.5);
+      }
+      // Mini silhouettes of all cities connected
+      ctx.globalAlpha = 0.2;
+      ctx.strokeStyle = '#00BCD4';
+      ctx.lineWidth = 1;
+      const miniLandmarks = [
+        {x:80,y:170}, {x:180,y:160}, {x:280,y:165},
+        {x:400,y:175}, {x:500,y:170}, {x:600,y:155},
+        {x:700,y:165}, {x:780,y:170}, {x:870,y:160}
+      ];
+      for (let i = 0; i < miniLandmarks.length - 1; i++) {
+        ctx.beginPath();
+        ctx.moveTo(miniLandmarks[i].x, miniLandmarks[i].y);
+        ctx.lineTo(miniLandmarks[i+1].x, miniLandmarks[i+1].y);
+        ctx.stroke();
+      }
+      // Mini landmarks
+      ctx.fillStyle = '#00BCD4';
+      ctx.globalAlpha = 0.3;
+      miniLandmarks.forEach((ml, i) => {
+        ctx.beginPath(); ctx.arc(ml.x, ml.y, 4, 0, Math.PI * 2); ctx.fill();
+      });
+      // Animated connection pulse
+      const pulseIdx = Math.floor(t * 2) % miniLandmarks.length;
+      ctx.fillStyle = '#00E676';
+      ctx.globalAlpha = 0.6;
+      ctx.beginPath();
+      ctx.arc(miniLandmarks[pulseIdx].x, miniLandmarks[pulseIdx].y, 5 + Math.sin(t*4)*2, 0, Math.PI*2);
+      ctx.fill();
+      break;
+  }
+  ctx.restore();
+}
+
+function drawMap(ctx) {
+  if (!currentMap) return;
+  const { map, size, city } = currentMap;
+
+  // Collect all drawable objects for painter's algorithm
+  const drawList = [];
+
+  for (let x = 0; x < size; x++) {
+    for (let y = 0; y < size; y++) {
+      const tile = map[x][y];
+      const pos = isoToScreen(x, y);
+      drawList.push({ x, y, sortKey: x + y, type: tile.type, floors: tile.floors, pos });
+    }
+  }
+
+  // Sort by depth (painter's algorithm)
+  drawList.sort((a, b) => a.sortKey - b.sortKey || a.x - b.x);
+
+  drawList.forEach(item => {
+    const { pos, type, floors, x, y } = item;
+
+    if (type === 'ground') {
+      drawIsoTile(ctx, pos.sx, pos.sy, city.groundColor, '#4CAF50');
+    } else if (type === 'road') {
+      drawIsoTile(ctx, pos.sx, pos.sy, city.roadColor, '#37474F');
+      // Road markings
+      ctx.strokeStyle = '#FFD600';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([4, 6]);
+      ctx.beginPath();
+      ctx.moveTo(pos.sx - 10, pos.sy + TILE_H/2);
+      ctx.lineTo(pos.sx + 10, pos.sy + TILE_H/2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    } else if (type === 'building') {
+      drawIsoTile(ctx, pos.sx, pos.sy, shadeColor(city.buildColor, -30), '#546E7A');
+      drawIsoBuilding(ctx, pos.sx, pos.sy, floors, city.buildColor);
+    } else if (type === 'tower') {
+      drawIsoTile(ctx, pos.sx, pos.sy, '#78909C', '#455A64');
+      const tower = G.towers.find(t => t.x === x && t.y === y);
+      if (tower) drawTower(ctx, pos.sx, pos.sy, tower.height);
+    }
+  });
+
+  // Install points (pulsing markers on rooftops)
+  G.installPoints.forEach(pt => {
+    if (pt.done) return;
+    const pos = isoToScreen(pt.x, pt.y, pt.floors);
+    const pulse = Math.sin(performance.now() / 300) * 0.3 + 0.7;
+
+    if (pt.takenByCompetitor) {
+      // Red/orange pulsing marker — competitor-taken, can negotiate
+      ctx.fillStyle = `rgba(255,87,34,${pulse})`;
+      ctx.beginPath();
+      ctx.arc(pos.sx, pos.sy - 5, 6 + pulse * 3, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = '#FF5722';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(pos.sx, pos.sy - 5, 10 + pulse * 5, 0, Math.PI * 2);
+      ctx.stroke();
+      // Flag icon
+      ctx.fillStyle = '#FF1744';
+      ctx.font = '12px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('🚩', pos.sx, pos.sy - 2);
+    } else {
+      // Normal green pulsing marker
+      ctx.fillStyle = `rgba(0,230,118,${pulse})`;
+      ctx.beginPath();
+      ctx.arc(pos.sx, pos.sy - 5, 6 + pulse * 3, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = '#00E676';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(pos.sx, pos.sy - 5, 10 + pulse * 5, 0, Math.PI * 2);
+      ctx.stroke();
+      // Antenna icon
+      ctx.fillStyle = '#FFF';
+      ctx.font = '10px Nunito';
+      ctx.textAlign = 'center';
+      ctx.fillText('◎', pos.sx, pos.sy - 3);
+    }
+  });
+}
+
+function drawMinimap() {
+  if (!currentMap) return;
+  const mc = document.getElementById('minimap').getContext('2d');
+  mc.clearRect(0, 0, 120, 120);
+  mc.fillStyle = 'rgba(0,0,0,0.3)';
+  mc.fillRect(0, 0, 120, 120);
+
+  const scale = 110 / currentMap.size;
+  const ox = 5, oy = 5;
+
+  for (let x = 0; x < currentMap.size; x++) {
+    for (let y = 0; y < currentMap.size; y++) {
+      const tile = currentMap.map[x][y];
+      mc.fillStyle = tile.type === 'road' ? '#546E7A' : tile.type === 'building' ? '#90A4AE' : tile.type === 'tower' ? '#E53935' : '#2E7D32';
+      mc.fillRect(ox + x * scale, oy + y * scale, scale - 0.5, scale - 0.5);
+    }
+  }
+
+  // Install points
+  G.installPoints.forEach(pt => {
+    mc.fillStyle = pt.done ? '#00E676' : '#FFD600';
+    mc.beginPath();
+    mc.arc(ox + pt.x * scale + scale/2, oy + pt.y * scale + scale/2, 3, 0, Math.PI * 2);
+    mc.fill();
+  });
+
+  // Tech position
+  mc.fillStyle = '#FF6D00';
+  mc.beginPath();
+  mc.arc(ox + tech.x * scale + scale/2, oy + tech.y * scale + scale/2, 3, 0, Math.PI * 2);
+  mc.fill();
+
+  // Competitors
+  G.competitors.forEach(c => {
+    if (!c.active) return;
+    mc.fillStyle = '#FF1744';
+    mc.fillRect(ox + c.x * scale, oy + c.y * scale, 3, 3);
+  });
+}
+
+// ── MODULE 16: HUD ──
+function updateHUD() {
+  const hudLeft = document.getElementById('hudLeft');
+  const hudCenter = document.getElementById('hudCenter');
+  const hudRight = document.getElementById('hudRight');
+  const hudBL = document.getElementById('hudBL');
+  const hudBR = document.getElementById('hudBR');
+
+  if (G.state === STATES.PLAYING || G.state === STATES.ALIGNING || G.state === STATES.CLIMBING || G.state === STATES.NEGOTIATING) {
+    const city = CITY_DATA[G.cityIdx];
+    const timerColor = G.timer < 10 ? '#FF1744' : G.timer < 20 ? '#FFD600' : '#FFF';
+    const timerBlink = G.timer < 10 && Math.sin(performance.now()/200) > 0 ? 'opacity:0.5' : '';
+
+    hudLeft.innerHTML = `<span style="color:#FF6D00">🔧 ${getCareerTitle()}</span>`;
+    hudCenter.innerHTML = `<span style="color:#00BCD4">${city.name[G.lang]}</span> <span>Lv.${G.level}</span> <span style="color:${timerColor};${timerBlink}">⏱ ${Math.floor(G.timer/60)}:${('0'+Math.floor(G.timer%60)).slice(-2)}</span> <span>📶 ${G.installed}/${G.required}</span>`;
+    const rotLabel = ['N','E','S','W'][G.rotation];
+    const weatherIcon = G.weather ? `<span style="color:#FF9800">${G.weather === 'rain' ? '🌧' : G.weather === 'wind' ? '💨' : G.weather === 'lightning' ? '⚡' : '🌡️'}</span> ` : '';
+    hudRight.innerHTML = `${weatherIcon}<span style="color:#00BCD4;font-size:11px">🔄${rotLabel}</span>`;
+
+    let hearts = '';
+    for (let i = 0; i < 3; i++) hearts += i < G.lives ? '♥' : '♡';
+    hudBL.innerHTML = `<span style="color:#FF1744;font-size:18px">${hearts}</span> <span>${T('score')}: ${G.score.toLocaleString()}</span>`;
+    hudBR.innerHTML = `<span>★ HI: ${G.hiScore.toLocaleString()}</span> <span style="cursor:pointer;pointer-events:auto" onclick="toggleLang()">[${['EN','ES','PT'][G.lang]}]</span>`;
+  } else {
+    hudLeft.innerHTML = hudCenter.innerHTML = hudRight.innerHTML = '';
+    hudBL.innerHTML = hudBR.innerHTML = '';
+  }
+}
+
+function toggleLang() {
+  G.lang = (G.lang + 1) % 3;
+  saveGame();
+}
+window.toggleLang = toggleLang;
+
+// ── MODULE 17: TITLE SCREEN ──
+function drawTitleScreen(ctx) {
+  // Background gradient
+  const grad = ctx.createLinearGradient(0, 0, 0, CH);
+  grad.addColorStop(0, '#0D47A1');
+  grad.addColorStop(0.5, '#1A237E');
+  grad.addColorStop(1, '#0D1117');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, CW, CH);
+
+  // Animated skyline
+  const t = performance.now() / 1000;
+  for (let i = 0; i < 15; i++) {
+    const bx = i * 70 - 20;
+    const bh = 60 + Math.sin(i * 1.3) * 40;
+    ctx.fillStyle = shadeColor('#1A237E', -10 + i % 3 * 5);
+    ctx.fillRect(bx, CH - bh - 40, 55, bh);
+    // Windows
+    ctx.fillStyle = 'rgba(255,255,200,0.3)';
+    for (let wy = CH - bh - 30; wy < CH - 50; wy += 15) {
+      for (let wx = bx + 8; wx < bx + 50; wx += 12) {
+        if (Math.random() > 0.3) ctx.fillRect(wx, wy, 5, 8);
+      }
+    }
+  }
+  // Ground
+  ctx.fillStyle = '#263238';
+  ctx.fillRect(0, CH - 40, CW, 40);
+
+  // Tower silhouette
+  const twX = CW / 2 + 200;
+  ctx.strokeStyle = 'rgba(255,255,255,0.3)';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(twX - 15, CH - 40);
+  ctx.lineTo(twX - 5, CH - 180);
+  ctx.moveTo(twX + 15, CH - 40);
+  ctx.lineTo(twX + 5, CH - 180);
+  ctx.stroke();
+  // Blinking red light
+  if (Math.sin(t * 3) > 0) {
+    ctx.fillStyle = '#FF1744';
+    ctx.beginPath();
+    ctx.arc(twX, CH - 185, 4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = 'rgba(255,23,68,0.2)';
+    ctx.beginPath();
+    ctx.arc(twX, CH - 185, 12, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Signal waves from tower
+  for (let w = 0; w < 4; w++) {
+    const r = ((t * 0.5 + w * 0.25) % 1) * 80;
+    ctx.strokeStyle = `rgba(0,188,212,${1 - r/80})`;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(twX, CH - 185, r, -Math.PI * 0.8, -Math.PI * 0.2);
+    ctx.stroke();
+  }
+
+  // Walking technician
+  const techX = ((t * 40) % (CW + 100)) - 50;
+  const techBounce = Math.sin(t * 10) * 2;
+  ctx.fillStyle = '#1565C0';
+  ctx.fillRect(techX - 4, CH - 52 + techBounce, 8, 10);
+  ctx.fillStyle = '#FF6D00';
+  ctx.beginPath();
+  ctx.arc(techX, CH - 58 + techBounce, 5, Math.PI, 0);
+  ctx.fill();
+  ctx.fillRect(techX - 6, CH - 58 + techBounce, 12, 2);
+  ctx.fillStyle = '#FFCC80';
+  ctx.beginPath();
+  ctx.arc(techX, CH - 56 + techBounce, 4, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Title
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#FFF';
+  ctx.font = 'bold 52px Nunito, sans-serif';
+  // Glow
+  ctx.shadowColor = '#00BCD4';
+  ctx.shadowBlur = 20;
+  ctx.fillText('WISP RUNNER', CW/2, 140);
+  ctx.shadowBlur = 0;
+
+  // Antenna icon in title
+  ctx.fillStyle = '#00BCD4';
+  ctx.font = '36px sans-serif';
+  ctx.fillText('📡', CW/2 - 200, 140);
+  ctx.fillText('🗼', CW/2 + 200, 140);
+
+  // Subtitle
+  ctx.fillStyle = '#00BCD4';
+  ctx.font = 'bold 16px Nunito, sans-serif';
+  ctx.fillText(T('subtitle'), CW/2, 175);
+
+  // Menu options
+  const menuItems = [T('newGame'), G.savedLevel > 0 ? T('continueGame') : null, T('quickCity'), T('credits')].filter(Boolean);
+  menuItems.forEach((item, i) => {
+    const y = 260 + i * 50;
+    const selected = G.titleSelection === i;
+    if (selected) {
+      ctx.fillStyle = 'rgba(0,188,212,0.15)';
+      ctx.beginPath();
+      ctx.roundRect(CW/2 - 140, y - 20, 280, 40, 8);
+      ctx.fill();
+      ctx.strokeStyle = '#00BCD4';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+    ctx.fillStyle = selected ? '#00BCD4' : '#B0BEC5';
+    ctx.font = `bold ${selected ? 22 : 18}px Nunito, sans-serif`;
+    ctx.fillText((selected ? '▶  ' : '    ') + item, CW/2, y + 6);
+  });
+
+  // Language selector
+  const langs = ['🇺🇸 EN', '🇲🇽 ES', '🇧🇷 PT'];
+  ctx.font = '14px Nunito, sans-serif';
+  langs.forEach((l, i) => {
+    ctx.fillStyle = G.lang === i ? '#00BCD4' : '#546E7A';
+    ctx.fillText(l, CW/2 - 60 + i * 60, CH - 60);
+  });
+
+  // Copyright
+  ctx.fillStyle = '#455A64';
+  ctx.font = '11px Nunito, sans-serif';
+  ctx.fillText(T('copyright'), CW/2, CH - 20);
+
+  // Press prompt
+  ctx.fillStyle = `rgba(255,255,255,${0.5 + Math.sin(t * 3) * 0.3})`;
+  ctx.font = '13px Nunito, sans-serif';
+  ctx.fillText(T('press'), CW/2, CH - 80);
+
+  // Instructions hint — prominent flashing
+  const hAlpha = 0.6 + Math.sin(t * 2.5) * 0.4;
+  ctx.fillStyle = `rgba(0,188,212,${hAlpha})`;
+  ctx.font = 'bold 15px Nunito, sans-serif';
+  ctx.strokeStyle = 'rgba(0,0,0,0.5)';
+  ctx.lineWidth = 3;
+  ctx.strokeText('[ H ] ' + T('instructions'), CW/2, CH - 42);
+  ctx.fillText('[ H ] ' + T('instructions'), CW/2, CH - 42);
+}
+
+// ── MODULE 18: CITY SELECT ──
+function drawCitySelect(ctx) {
+  // Dark map background
+  ctx.fillStyle = '#0D1117';
+  ctx.fillRect(0, 0, CW, CH);
+
+  // Stars background
+  for (let i = 0; i < 60; i++) {
+    const sx = (i * 73 + 10) % CW;
+    const sy = (i * 47 + 20) % CH;
+    ctx.fillStyle = `rgba(255,255,255,${0.2 + Math.sin(performance.now()/1000 + i) * 0.15})`;
+    ctx.fillRect(sx, sy, 2, 2);
+  }
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#FFF';
+  ctx.font = 'bold 28px Nunito, sans-serif';
+  ctx.fillText('SELECT CITY', CW/2, 45);
+
+  // City nodes on map
+  const positions = [
+    {x:250,y:250}, {x:310,y:320}, {x:220,y:300}, // Mexico
+    {x:500,y:420}, {x:480,y:460}, // Brazil
+    {x:450,y:200}, // Dallas
+    {x:400,y:360}, // Bogota
+    {x:530,y:500}, // Buenos Aires
+    {x:550,y:250}, // Miami
+    {x:CW/2,y:560}, // Finale
+  ];
+
+  // Connection lines
+  ctx.strokeStyle = 'rgba(0,188,212,0.2)';
+  ctx.lineWidth = 1;
+  for (let i = 0; i < positions.length - 1; i++) {
+    if (G.unlockedCities[i]) {
+      ctx.beginPath();
+      ctx.moveTo(positions[i].x, positions[i].y);
+      ctx.lineTo(positions[i+1].x, positions[i+1].y);
+      ctx.stroke();
+    }
+  }
+
+  CITY_DATA.forEach((city, i) => {
+    const p = positions[i];
+    const unlocked = G.unlockedCities[i];
+    const selected = G.citySelection === i;
+
+    // Node circle
+    ctx.fillStyle = !unlocked ? '#37474F' : selected ? '#00BCD4' : '#0D47A1';
+    ctx.strokeStyle = selected ? '#00E676' : unlocked ? '#00BCD4' : '#455A64';
+    ctx.lineWidth = selected ? 3 : 1.5;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, selected ? 22 : 16, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+
+    if (!unlocked) {
+      // Lock icon
+      ctx.fillStyle = '#78909C';
+      ctx.font = '14px sans-serif';
+      ctx.fillText('🔒', p.x, p.y + 5);
+    } else {
+      // City number
+      ctx.fillStyle = '#FFF';
+      ctx.font = 'bold 12px Space Mono, monospace';
+      ctx.fillText(`${i + 1}`, p.x, p.y + 4);
+
+      // Stars
+      if (G.cityStars[i] > 0) {
+        ctx.fillStyle = '#FFD600';
+        ctx.font = '10px sans-serif';
+        ctx.fillText('★'.repeat(Math.min(G.cityStars[i], 3)), p.x, p.y + 32);
+      }
+    }
+
+    // City name (show for selected or nearby)
+    if (selected && unlocked) {
+      ctx.fillStyle = '#FFF';
+      ctx.font = 'bold 16px Nunito, sans-serif';
+      ctx.fillText(city.name[G.lang], p.x, p.y - 30);
+      ctx.fillStyle = '#00BCD4';
+      ctx.font = '12px Nunito, sans-serif';
+      ctx.fillText(city.subtitle[G.lang], p.x, p.y - 14);
+
+      // Tip
+      ctx.fillStyle = '#FFD600';
+      ctx.font = '11px Nunito, sans-serif';
+      ctx.fillText(city.tip[G.lang], CW/2, CH - 50);
+    }
+  });
+
+  // Instructions
+  ctx.fillStyle = '#78909C';
+  ctx.font = '12px Nunito, sans-serif';
+  ctx.fillText('← → ' + T('press') + '  |  ' + T('back'), CW/2, CH - 20);
+}
+
+// ── MODULE 19: LEVEL CLEAR / GAME OVER SCREENS ──
+function drawLevelClear(ctx) {
+  ctx.fillStyle = 'rgba(0,0,0,0.6)';
+  ctx.fillRect(0, 0, CW, CH);
+
+  ctx.textAlign = 'center';
+
+  // City and level info
+  const city = CITY_DATA[G.cityIdx];
+  ctx.fillStyle = '#00BCD4';
+  ctx.font = 'bold 18px Nunito, sans-serif';
+  ctx.fillText(`${city.name[G.lang]} — Lv.${G.level}`, CW/2, CH/2 - 80);
+
+  ctx.fillStyle = '#00E676';
+  ctx.font = 'bold 48px Nunito, sans-serif';
+  ctx.shadowColor = '#00E676';
+  ctx.shadowBlur = 15;
+  ctx.fillText(T('levelClear'), CW/2, CH/2 - 30);
+  ctx.shadowBlur = 0;
+
+  ctx.fillStyle = '#FFF';
+  ctx.font = 'bold 24px Nunito, sans-serif';
+  ctx.fillText(`${T('score')}: ${G.score.toLocaleString()}`, CW/2, CH/2 + 20);
+
+  const allExcellent = G.signalArcs.length > 0 && G.signalArcs.every(a => a.quality === 'excellent');
+  if (allExcellent) {
+    ctx.fillStyle = '#FFD600';
+    ctx.font = 'bold 18px Nunito, sans-serif';
+    ctx.fillText('★ ALL EXCELLENT LINKS! ★', CW/2, CH/2 + 55);
+  }
+
+  // Show what's next
+  const cityLevels = city.levels;
+  const nextLevelInCity = G.levelInCity + 1;
+  ctx.font = '15px Nunito, sans-serif';
+  if (nextLevelInCity < cityLevels.length) {
+    ctx.fillStyle = '#00BCD4';
+    ctx.fillText(`→ ${city.name[G.lang]} Lv.${cityLevels[nextLevelInCity]}`, CW/2, CH/2 + 85);
+  } else if (G.cityIdx < 9) {
+    const nextCity = CITY_DATA[G.cityIdx + 1];
+    ctx.fillStyle = '#FFD600';
+    ctx.fillText(`★ ${nextCity.name[G.lang]} ${['UNLOCKED!','¡DESBLOQUEADA!','DESBLOQUEADA!'][G.lang]}`, CW/2, CH/2 + 85);
+  } else {
+    ctx.fillStyle = '#FFD600';
+    ctx.fillText('★ GAME COMPLETE! ★', CW/2, CH/2 + 85);
+  }
+
+  ctx.fillStyle = `rgba(255,255,255,${0.5 + Math.sin(performance.now()/300) * 0.3})`;
+  ctx.font = '14px Nunito, sans-serif';
+  ctx.fillText(T('press'), CW/2, CH/2 + 120);
+}
+
+function drawGameOver(ctx) {
+  ctx.fillStyle = 'rgba(0,0,0,0.75)';
+  ctx.fillRect(0, 0, CW, CH);
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#FF1744';
+  ctx.font = 'bold 48px Nunito, sans-serif';
+  ctx.fillText(T('gameOver'), CW/2, CH/2 - 30);
+
+  ctx.fillStyle = '#FFF';
+  ctx.font = 'bold 20px Nunito, sans-serif';
+  ctx.fillText(`${T('score')}: ${G.score.toLocaleString()}`, CW/2, CH/2 + 20);
+  ctx.fillText(`★ HI: ${G.hiScore.toLocaleString()}`, CW/2, CH/2 + 50);
+
+  ctx.fillStyle = `rgba(255,255,255,${0.5 + Math.sin(performance.now()/300) * 0.3})`;
+  ctx.font = '14px Nunito, sans-serif';
+  ctx.fillText(T('press'), CW/2, CH/2 + 100);
+}
+
+function drawInstructions(ctx) {
+  ctx.fillStyle = 'rgba(0,0,0,0.85)';
+  ctx.fillRect(0, 0, CW, CH);
+
+  ctx.textAlign = 'center';
+
+  // Title
+  ctx.fillStyle = '#00BCD4';
+  ctx.font = 'bold 32px Nunito, sans-serif';
+  ctx.fillText(T('instructions'), CW/2, 60);
+
+  // Decorative antenna
+  ctx.fillStyle = '#00BCD4';
+  ctx.font = '28px sans-serif';
+  ctx.fillText('📡', CW/2 - 140, 60);
+  ctx.fillText('🗼', CW/2 + 140, 60);
+
+  // Instruction lines
+  const lines = [
+    { icon: '🎯', text: T('instrGoal'), color: '#FFD600' },
+    { icon: '🏃', text: T('instrMove'), color: '#FFF' },
+    { icon: '🧗', text: T('instrClimb'), color: '#FFF' },
+    { icon: '⚡', text: T('instrClimbTip'), color: '#00E676' },
+    { icon: '📡', text: T('instrAlign'), color: '#FFF' },
+    { icon: '🔒', text: T('instrLock'), color: '#FFF' },
+    { icon: '⭐', text: T('instrSignal'), color: '#00E676' },
+    { icon: '🌧️', text: T('instrWeather'), color: '#FF9800' },
+    { icon: '🚐', text: T('instrComp'), color: '#FF1744' },
+    { icon: '🚩', text: T('instrNego'), color: '#FF9800' },
+    { icon: '🔄', text: T('instrRotate'), color: '#00BCD4' },
+    { icon: '⏸', text: T('instrPause'), color: '#B0BEC5' },
+    { icon: 'ℹ️', text: T('instrHelp'), color: '#B0BEC5' },
+  ];
+
+  const startY = 95;
+  const lineH = 32;
+
+  lines.forEach((line, i) => {
+    const y = startY + i * lineH;
+
+    // Icon
+    ctx.font = '18px sans-serif';
+    ctx.fillText(line.icon, CW/2 - 280, y + 5);
+
+    // Text
+    ctx.fillStyle = line.color;
+    ctx.font = '15px Nunito, sans-serif';
+    ctx.textAlign = 'left';
+    ctx.fillText(line.text, CW/2 - 250, y + 4);
+    ctx.textAlign = 'center';
+  });
+
+  // Signal quality guide
+  const guideY = startY + lines.length * lineH + 20;
+  ctx.fillStyle = '#546E7A';
+  ctx.fillRect(CW/2 - 200, guideY - 5, 400, 70);
+  ctx.fillStyle = '#263238';
+  ctx.fillRect(CW/2 - 198, guideY - 3, 396, 66);
+
+  ctx.font = 'bold 12px Space Mono, monospace';
+  ctx.fillStyle = '#00BCD4';
+  ctx.fillText('SIGNAL QUALITY GUIDE', CW/2, guideY + 12);
+
+  ctx.font = '12px Space Mono, monospace';
+  ctx.fillStyle = '#00E676';
+  ctx.fillText('-65 dBm+  →  EXCELLENT  →  x2 Points ⭐', CW/2, guideY + 30);
+  ctx.fillStyle = '#FFD600';
+  ctx.fillText('-65 to -75 dBm  →  GOOD  →  x1 Points', CW/2, guideY + 45);
+  ctx.fillStyle = '#FF1744';
+  ctx.fillText('< -75 dBm  →  WEAK  →  x0.5 Points', CW/2, guideY + 60);
+
+  // Close hint
+  ctx.fillStyle = `rgba(255,255,255,${0.5 + Math.sin(performance.now()/300) * 0.3})`;
+  ctx.font = '13px Nunito, sans-serif';
+  ctx.fillText('H / ESC / SPACE', CW/2, CH - 30);
+
+  ctx.fillStyle = '#455A64';
+  ctx.font = '11px Nunito, sans-serif';
+  ctx.fillText(T('copyright'), CW/2, CH - 10);
+}
+
+// ── MODULE 20: GAME UPDATE ──
+function update() {
+  switch (G.state) {
+    case STATES.TITLE:
+      updateTitle();
+      break;
+    case STATES.CITY_SELECT:
+      updateCitySelect();
+      break;
+    case STATES.PLAYING:
+      updatePlaying();
+      break;
+    case STATES.ALIGNING:
+      updateAlignment();
+      break;
+    case STATES.CLIMBING:
+      updateClimb();
+      break;
+    case STATES.LEVEL_CLEAR:
+      G.levelClearTimer -= G.dt;
+      if (G.levelClearTimer <= 0 || justPressed('Space') || justPressed('Enter')) {
+        const cityLevels = CITY_DATA[G.cityIdx].levels;
+        const nextLevelInCity = G.levelInCity + 1;
+        if (nextLevelInCity < cityLevels.length) {
+          // Advance to next level in same city
+          startLevel(G.cityIdx, nextLevelInCity);
+        } else {
+          // All city levels done — go to city select
+          G.state = STATES.CITY_SELECT;
+        }
+      }
+      break;
+    case STATES.GAME_OVER:
+      G.gameOverTimer -= G.dt;
+      if (G.gameOverTimer <= 0 || justPressed('Space') || justPressed('Enter')) {
+        G.state = STATES.TITLE;
+        G.score = 0;
+        G.lives = 3;
+      }
+      break;
+    case STATES.PAUSED:
+      if (justPressed('Escape') || justPressed('KeyP')) G.state = STATES.PLAYING;
+      if (justPressed('KeyH')) { G.prevState = STATES.PAUSED; G.state = STATES.INSTRUCTIONS; }
+      break;
+    case STATES.INSTRUCTIONS:
+      if (justPressed('Escape') || justPressed('KeyH') || justPressed('Space')) {
+        G.state = G.prevState || STATES.TITLE;
+      }
+      break;
+    case STATES.NEGOTIATING:
+      updateNegotiation();
+      break;
+  }
+  updateParticles();
+}
+
+function updateTitle() {
+  G.titleAnim += G.dt;
+  const menuCount = G.savedLevel > 0 ? 4 : 3;
+
+  if (justPressed('ArrowDown')) { G.titleSelection = (G.titleSelection + 1) % menuCount; sfx('menuMove'); }
+  if (justPressed('ArrowUp')) { G.titleSelection = (G.titleSelection - 1 + menuCount) % menuCount; sfx('menuMove'); }
+
+  // Language switch
+  if (justPressed('ArrowLeft')) { G.lang = (G.lang - 1 + 3) % 3; sfx('menuMove'); saveGame(); }
+  if (justPressed('ArrowRight')) { G.lang = (G.lang + 1) % 3; sfx('menuMove'); saveGame(); }
+
+  if (justPressed('KeyH')) { G.prevState = STATES.TITLE; G.state = STATES.INSTRUCTIONS; return; }
+
+  if (justPressed('Enter') || justPressed('Space')) {
+    initAudio();
+    sfx('select');
+    const items = ['new', G.savedLevel > 0 ? 'continue' : null, 'quick', 'credits'].filter(Boolean);
+    const action = items[G.titleSelection];
+    if (action === 'new') {
+      G.score = 0; G.lives = 3;
+      G.state = STATES.CITY_SELECT;
+      G.citySelection = 0;
+    } else if (action === 'continue') {
+      G.score = 0; G.lives = 3;
+      G.state = STATES.CITY_SELECT;
+      // Find the right city
+      for (let i = 0; i < CITY_DATA.length; i++) {
+        if (CITY_DATA[i].levels.includes(G.savedLevel)) { G.citySelection = i; break; }
+      }
+    } else if (action === 'quick') {
+      G.score = 0; G.lives = 3;
+      G.state = STATES.CITY_SELECT;
+    }
+  }
+}
+
+function updateCitySelect() {
+  if (justPressed('ArrowRight')) {
+    let next = G.citySelection;
+    for (let i = 1; i <= 10; i++) {
+      const n = (G.citySelection + i) % 10;
+      if (G.unlockedCities[n]) { next = n; break; }
+    }
+    G.citySelection = next;
+    sfx('menuMove');
+  }
+  if (justPressed('ArrowLeft')) {
+    let next = G.citySelection;
+    for (let i = 1; i <= 10; i++) {
+      const n = (G.citySelection - i + 10) % 10;
+      if (G.unlockedCities[n]) { next = n; break; }
+    }
+    G.citySelection = next;
+    sfx('menuMove');
+  }
+
+  if (justPressed('Escape')) {
+    G.state = STATES.TITLE;
+    sfx('select');
+  }
+
+  if ((justPressed('Enter') || justPressed('Space')) && G.unlockedCities[G.citySelection]) {
+    sfx('select');
+    // Start at the next uncompleted level in this city
+    const completedLevels = G.cityStars[G.citySelection] || 0;
+    const maxLevels = CITY_DATA[G.citySelection].levels.length;
+    const startAt = Math.min(completedLevels, maxLevels - 1);
+    startLevel(G.citySelection, startAt);
+  }
+}
+
+function updatePlaying() {
+  // Timer
+  G.timer -= G.dt;
+  if (G.timer <= 0) {
+    G.timer = 0;
+    gameOver();
+    return;
+  }
+
+  // If on rooftop, ESC descends first
+  if (tech.z > 0 && justPressed('Escape')) {
+    tech.z = 0;
+    tech.onBuilding = null;
+    tech.state = 'idle';
+    return;
+  }
+  // Pause / Instructions
+  if (justPressed('Escape') || justPressed('KeyP')) {
+    G.state = STATES.PAUSED;
+    return;
+  }
+  if (justPressed('KeyH')) { G.prevState = STATES.PLAYING; G.state = STATES.INSTRUCTIONS; return; }
+
+  // Camera rotation
+  if (justPressed('KeyQ')) { G.rotation = (G.rotation + 1) % 4; sfx('menuMove'); }
+  if (justPressed('KeyE')) { G.rotation = (G.rotation + 3) % 4; sfx('menuMove'); }
+
+  // Shake decay
+  if (G.shakeTimer > 0) G.shakeTimer -= G.dt;
+
+  // Weather
+  updateWeather();
+  if (!G.weather && Math.random() < 0.001) spawnWeather();
+
+  // Competitors
+  updateCompetitors();
+
+  // Movement
+  const spd = moveSpeed() * G.dt;
+  let moved = false;
+
+  if (tech.z === 0) {
+    // Ground movement
+    if (G.keys['ArrowUp'] || G.keys['KeyW']) { tech.y -= spd; moved = true; tech.facing = 'up'; }
+    if (G.keys['ArrowDown'] || G.keys['KeyS']) { tech.y += spd; moved = true; tech.facing = 'down'; }
+    if (G.keys['ArrowLeft'] || G.keys['KeyA']) { tech.x -= spd; moved = true; tech.facing = 'left'; }
+    if (G.keys['ArrowRight'] || G.keys['KeyD']) { tech.x += spd; moved = true; tech.facing = 'right'; }
+
+    // Clamp to map
+    if (currentMap) {
+      tech.x = Math.max(0, Math.min(currentMap.size - 0.5, tech.x));
+      tech.y = Math.max(0, Math.min(currentMap.size - 0.5, tech.y));
+    }
+
+    tech.state = moved ? 'walking' : 'idle';
+    if (moved) {
+      tech.animTimer += G.dt;
+      if (Math.floor(tech.animTimer * 6) % 2 === 0 && Math.random() < 0.1) sfx('step');
+    }
+
+    // Check proximity to install points
+    G.installPoints.forEach(pt => {
+      if (pt.done) return;
+      const dist = Math.sqrt((tech.x - pt.x) ** 2 + (tech.y - pt.y) ** 2);
+      if (dist < 1.2 && justPressed('Space')) {
+        if (pt.takenByCompetitor) {
+          startNegotiation(pt);
+        } else {
+          startClimb(pt);
+        }
+      }
+    });
+  } else {
+    // On rooftop — press Escape to descend
+    if (justPressed('Escape')) {
+      tech.z = 0;
+      tech.onBuilding = null;
+      tech.state = 'idle';
+    }
+  }
+
+  // Camera follow
+  const techScreen = isoToScreen(tech.x, tech.y, tech.z);
+  const targetCamX = CW/2 - techScreen.sx + G.camera.x;
+  const targetCamY = CH/2 - techScreen.sy + G.camera.y;
+  G.camera.x += (targetCamX - G.camera.x) * 0.05;
+  G.camera.y += (targetCamY - G.camera.y) * 0.05;
+}
+
+// ── MODULE 21: MAIN RENDER ──
+function render() {
+  ctx.clearRect(0, 0, CW, CH);
+
+  // Screen shake
+  if (G.shakeTimer > 0) {
+    ctx.save();
+    ctx.translate(
+      (Math.random() - 0.5) * G.shakeIntensity,
+      (Math.random() - 0.5) * G.shakeIntensity
+    );
+  }
+
+  switch (G.state) {
+    case STATES.TITLE:
+      drawTitleScreen(ctx);
+      break;
+    case STATES.CITY_SELECT:
+      drawCitySelect(ctx);
+      break;
+    case STATES.PLAYING:
+    case STATES.ALIGNING:
+    case STATES.CLIMBING:
+    case STATES.PAUSED:
+    case STATES.NEGOTIATING:
+      drawSky(ctx, G.cityIdx);
+      drawMap(ctx);
+      drawSignalArcs(ctx);
+      drawCompetitors(ctx);
+      if (tech.z === 0 || G.state === STATES.CLIMBING) drawTechnician(ctx);
+      else {
+        // Draw tech on rooftop
+        drawTechnician(ctx);
+      }
+      drawWeather(ctx);
+      drawParticles(ctx);
+
+      if (G.state === STATES.CLIMBING) drawClimbUI(ctx);
+      if (G.state === STATES.NEGOTIATING) drawNegotiationUI(ctx);
+      if (G.state === STATES.ALIGNING) {
+        // Draw signal beam during alignment
+        if (align.currentPoint) {
+          const from = isoToScreen(align.currentPoint.x, align.currentPoint.y, align.currentPoint.floors);
+          const to = isoToScreen(align.currentPoint.tower.x, align.currentPoint.tower.y, align.currentPoint.tower.height);
+          const sigPct = Math.max(0, (align.signal + 100) / 50);
+          ctx.strokeStyle = `rgba(0,230,118,${sigPct * 0.5})`;
+          ctx.lineWidth = 2;
+          ctx.setLineDash([6, 4]);
+          ctx.beginPath();
+          ctx.moveTo(from.sx, from.sy - 10);
+          ctx.lineTo(to.sx, to.sy);
+          ctx.stroke();
+          ctx.setLineDash([]);
+        }
+      }
+      if (G.state === STATES.PAUSED) {
+        ctx.fillStyle = 'rgba(0,0,0,0.5)';
+        ctx.fillRect(0, 0, CW, CH);
+        ctx.fillStyle = '#FFF';
+        ctx.font = 'bold 36px Nunito, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText(T('paused'), CW/2, CH/2);
+        ctx.font = '14px Nunito';
+        ctx.fillText('ESC / P', CW/2, CH/2 + 35);
+      }
+      // Proximity hint
+      if (G.state === STATES.PLAYING && tech.z === 0) {
+        G.installPoints.forEach(pt => {
+          if (pt.done) return;
+          const dist = Math.sqrt((tech.x - pt.x)**2 + (tech.y - pt.y)**2);
+          if (dist < 1.5) {
+            const pos = isoToScreen(pt.x, pt.y, pt.floors);
+            if (pt.takenByCompetitor) {
+              ctx.fillStyle = `rgba(255,152,0,${0.6 + Math.sin(performance.now()/200)*0.3})`;
+              ctx.font = 'bold 11px Nunito, sans-serif';
+              ctx.textAlign = 'center';
+              const negoLabel = ['SPACE: Negotiate', 'ESPACIO: Negociar', 'ESPAÇO: Negociar'];
+              ctx.fillText(negoLabel[G.lang], pos.sx, pos.sy + 20);
+            } else {
+              ctx.fillStyle = `rgba(0,230,118,${0.6 + Math.sin(performance.now()/200)*0.3})`;
+              ctx.font = 'bold 12px Nunito, sans-serif';
+              ctx.textAlign = 'center';
+              ctx.fillText('SPACE ▲', pos.sx, pos.sy + 20);
+            }
+          }
+        });
+      }
+      break;
+    case STATES.LEVEL_CLEAR:
+      drawSky(ctx, G.cityIdx);
+      drawMap(ctx);
+      drawSignalArcs(ctx);
+      drawParticles(ctx);
+      drawLevelClear(ctx);
+      break;
+    case STATES.GAME_OVER:
+      drawSky(ctx, G.cityIdx);
+      drawMap(ctx);
+      drawParticles(ctx);
+      drawGameOver(ctx);
+      break;
+    case STATES.INSTRUCTIONS:
+      drawInstructions(ctx);
+      break;
+  }
+
+  if (G.shakeTimer > 0) ctx.restore();
+
+  // Always draw notifications on top
+  drawParticles(ctx);
+
+  // Update HUD and panels
+  updateHUD();
+  renderAlignPanel();
+  if (G.state === STATES.PLAYING || G.state === STATES.ALIGNING || G.state === STATES.CLIMBING || G.state === STATES.NEGOTIATING) {
+    drawMinimap();
+    document.getElementById('minimap').style.display = 'block';
+  } else {
+    document.getElementById('minimap').style.display = 'none';
+  }
+}
+
+// ── MODULE 22: GAME LOOP ──
+function gameLoop(timestamp) {
+  G.dt = Math.min(0.05, (timestamp - G.lastTime) / 1000);
+  G.lastTime = timestamp;
+
+  update();
+  render();
+
+  // Clear just-pressed
+  G.keysJust = {};
+
+  requestAnimationFrame(gameLoop);
+}
+
+// ── INIT ──
+loadGame();
+G.lastTime = performance.now();
+requestAnimationFrame(gameLoop);
+
+</script>
+</body>
+</html>
