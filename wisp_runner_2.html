@@ -439,7 +439,17 @@ function generateMap(cityIdx, levelInCity) {
 
   // Install points (on building rooftops)
   const numInstalls = 2 + levelInCity + Math.floor(cityIdx / 2);
-  const candidates = buildings.filter(b => b.floors >= 2).sort(() => srand() - 0.5);
+  // Ensure we have enough tall buildings — promote shorter ones if needed (avoids G.required=0 soft-lock)
+  let candidates = buildings.filter(b => b.floors >= 2).sort(() => srand() - 0.5);
+  if (candidates.length < numInstalls) {
+    const shortBuildings = buildings.filter(b => b.floors < 2).sort(() => srand() - 0.5);
+    for (const sb of shortBuildings) {
+      if (candidates.length >= numInstalls) break;
+      sb.floors = 2;
+      map[sb.x][sb.y].floors = 2;
+      candidates.push(sb);
+    }
+  }
   for (let i = 0; i < Math.min(numInstalls, candidates.length); i++) {
     const b = candidates[i];
     // Find nearest tower
@@ -464,8 +474,12 @@ function generateMap(cityIdx, levelInCity) {
 // ── MODULE 5: AUDIO ENGINE ──
 let audioCtx = null;
 function initAudio() {
-  if (audioCtx) return;
-  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (!audioCtx) {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  }
+  if (audioCtx.state === 'suspended') {
+    audioCtx.resume();
+  }
 }
 
 function playTone(freq, duration, type = 'square', vol = 0.08) {
@@ -492,6 +506,7 @@ function sfx(name) {
     case 'good': [440,554,659].forEach((f,i) => setTimeout(()=>playTone(f,0.15,'sine',0.08), i*100)); break;
     case 'weak': [330,277].forEach((f,i) => setTimeout(()=>playTone(f,0.2,'sawtooth',0.06), i*150)); break;
     case 'competitor': playTone(200, 0.15, 'sawtooth', 0.1); setTimeout(()=>playTone(180, 0.15, 'sawtooth', 0.1), 200); break;
+    case 'penalty': playTone(110, 0.18, 'sawtooth', 0.14); setTimeout(()=>playTone(82, 0.22, 'sawtooth', 0.12), 80); break;
     case 'coin': playTone(1100, 0.06, 'square', 0.08); setTimeout(()=>playTone(1400, 0.1, 'square', 0.08), 60); break;
     case 'lock': playTone(880, 0.05, 'sine', 0.1); setTimeout(()=>playTone(880, 0.05, 'sine', 0.1), 80); break;
     case 'thunder': {
@@ -586,6 +601,11 @@ function stopBGM() {
 }
 
 // ── MODULE 6: INPUT ──
+const GAME_KEYS = new Set([
+  'ArrowUp','ArrowDown','ArrowLeft','ArrowRight',
+  'Space','Enter','Escape',
+  'KeyW','KeyA','KeyS','KeyD','KeyQ','KeyE','KeyH','KeyP','KeyL','KeyM'
+]);
 document.addEventListener('keydown', e => {
   if (!G.keys[e.code]) G.keysJust[e.code] = true;
   G.keys[e.code] = true;
@@ -596,17 +616,25 @@ document.addEventListener('keydown', e => {
     if (G.easterEggBuffer.endsWith('WISPA')) {
       addNotification('WISPAPALOOZA MODE! +50% Speed!', '#FFD600', CW/2, CH/2);
       sfx('excellent');
+      G.eeWispaSpeed = 1.5;
       G.easterEggBuffer = '';
     }
     if (G.easterEggBuffer.endsWith('MIMOSA')) {
       addNotification('MIMOSA A5x UNLOCKED!', '#FFD600', CW/2, CH/2);
       sfx('excellent');
+      G.eeMimosaBoost = true;
       G.easterEggBuffer = '';
     }
   }
-  e.preventDefault();
+  // Only prevent default for game keys — leaves F5/F12/Cmd+R/inputs alone
+  if (GAME_KEYS.has(e.code)) e.preventDefault();
 });
 document.addEventListener('keyup', e => { G.keys[e.code] = false; });
+
+// Auto-pause when window loses focus (prevents background-running during demo/recording)
+window.addEventListener('blur', () => {
+  if (G.state === STATES.PLAYING) G.state = STATES.PAUSED;
+});
 
 function justPressed(code) {
   if (G.keysJust[code]) { G.keysJust[code] = false; return true; }
@@ -705,6 +733,7 @@ function moveSpeed() {
   if (G.careerLevel > 20) s *= 1.15;
   if (G.weather === 'rain') s *= 0.7;
   if (G.weather === 'heat') s *= 0.8;
+  if (G.eeWispaSpeed) s *= G.eeWispaSpeed;
   return s;
 }
 
@@ -740,6 +769,35 @@ function calcSignal() {
 function updateAlignment() {
   if (G.state !== STATES.ALIGNING) return;
 
+  // Allow aborting alignment without locking (avoids soft-lock at -100 dBm)
+  if (!align.locked && justPressed('Escape')) {
+    G.state = STATES.PLAYING;
+    tech.z = 0;
+    tech.onBuilding = null;
+    tech.state = 'idle';
+    document.getElementById('alignPanel').style.display = 'none';
+    return;
+  }
+
+  // Pending auto-descend after lock — pause-safe timer instead of setTimeout
+  if (align.locked && align.completeTimer !== undefined) {
+    align.completeTimer -= G.dt;
+    if (align.completeTimer <= 0) {
+      align.completeTimer = undefined;
+      G.state = STATES.PLAYING;
+      align.locked = false;
+      tech.z = 0;
+      tech.onBuilding = null;
+      tech.state = 'idle';
+      document.getElementById('alignPanel').style.display = 'none';
+      // Level complete check against the original required count, not dynamic availablePoints
+      if (G.installed >= G.required) {
+        levelComplete();
+      }
+    }
+    return;
+  }
+
   const spd = 4;
   if (G.keys['ArrowLeft']) align.azimuth = (align.azimuth - spd + 360) % 360;
   if (G.keys['ArrowRight']) align.azimuth = (align.azimuth + spd) % 360;
@@ -757,10 +815,16 @@ function updateAlignment() {
       quality = 'excellent'; mult = 2.0; label = T('excellent');
       sfx('excellent');
       G.consecutiveExcellent++;
+      // Juice: green burst + light shake on excellent
+      const pos = isoToScreen(align.currentPoint.x, align.currentPoint.y, align.currentPoint.floors);
+      addParticle(pos.sx, pos.sy - 10, '#00E676', 18);
+      G.shakeTimer = 0.15; G.shakeIntensity = 3;
     } else if (align.signal >= -75) {
       quality = 'good'; mult = 1.0; label = T('good');
       sfx('good');
       G.consecutiveExcellent = 0;
+      const pos = isoToScreen(align.currentPoint.x, align.currentPoint.y, align.currentPoint.floors);
+      addParticle(pos.sx, pos.sy - 10, '#FFD600', 10);
     } else {
       quality = 'weak'; mult = 0.5; label = T('weak');
       sfx('weak');
@@ -800,29 +864,16 @@ function updateAlignment() {
     addNotification(`+${points} ${label}`, quality === 'excellent' ? '#00E676' : quality === 'good' ? '#FFD600' : '#FF1744',
       isoToScreen(pt.x, pt.y, pt.floors).sx, isoToScreen(pt.x, pt.y, pt.floors).sy - 30);
 
-    // Career XP
+    // Career XP — loop so banked XP grants every level it earned
     G.careerXP += points;
-    if (G.careerXP >= G.careerLevel * 500 && G.careerLevel < 30) {
+    while (G.careerXP >= G.careerLevel * 500 && G.careerLevel < 30) {
       G.careerLevel++;
       addNotification('LEVEL UP! ' + getCareerTitle(), '#00BCD4', CW/2, CH/2);
       sfx('levelClear');
     }
 
-    // Back to playing — auto-descend from rooftop
-    setTimeout(() => {
-      G.state = STATES.PLAYING;
-      align.locked = false;
-      tech.z = 0;
-      tech.onBuilding = null;
-      tech.state = 'idle';
-      document.getElementById('alignPanel').style.display = 'none';
-
-      // Check level complete — exclude competitor-taken points
-      const availablePoints = G.installPoints.filter(p => !p.takenByCompetitor).length;
-      if (G.installed >= availablePoints) {
-        levelComplete();
-      }
-    }, 800);
+    // Schedule auto-descend via dt timer (pause-safe, no setTimeout)
+    align.completeTimer = 0.8;
   }
 }
 
@@ -1205,6 +1256,7 @@ function updateWeather() {
       G.lives--;
       G.score = Math.max(0, G.score - 200);
       addNotification('-200 LIGHTNING!', '#FF1744', CW/2, CH/3);
+      sfx('penalty');
       if (G.lives <= 0) gameOver();
     }
   }
@@ -1255,11 +1307,23 @@ function drawWeather(ctx) {
 function spawnCompetitors(mapData) {
   G.competitors = [];
   if (G.cityIdx < 1) return; // No competitors in first city first levels
-  const numComp = Math.min(Math.floor(G.cityIdx / 2) + 1, 3);
-  for (let i = 0; i < numComp; i++) {
-    const target = mapData.installPts[Math.floor(Math.random() * mapData.installPts.length)];
-    if (!target) continue;
-    const edge = Math.random() > 0.5 ? { x: 0, y: Math.floor(Math.random() * mapData.size) } : { x: Math.floor(Math.random() * mapData.size), y: 0 };
+  const numComp = Math.min(Math.floor(G.cityIdx / 2) + 1, 3, mapData.installPts.length);
+  // Shuffle install points and pick distinct targets so two competitors don't race the same point
+  const targets = mapData.installPts.slice().sort(() => Math.random() - 0.5).slice(0, numComp);
+  // Find road tiles on the perimeter so the competitor spawns on a walkable edge
+  const roadEdges = [];
+  const s = mapData.size;
+  for (let i = 0; i < s; i++) {
+    if (mapData.map[0][i].type === 'road') roadEdges.push({ x: 0, y: i });
+    if (mapData.map[s - 1][i].type === 'road') roadEdges.push({ x: s - 1, y: i });
+    if (mapData.map[i][0].type === 'road') roadEdges.push({ x: i, y: 0 });
+    if (mapData.map[i][s - 1].type === 'road') roadEdges.push({ x: i, y: s - 1 });
+  }
+  for (let i = 0; i < targets.length; i++) {
+    const target = targets[i];
+    const edge = roadEdges.length > 0
+      ? roadEdges[Math.floor(Math.random() * roadEdges.length)]
+      : { x: 0, y: Math.floor(Math.random() * s) };
     G.competitors.push({
       x: edge.x, y: edge.y,
       targetPt: target,
@@ -1288,7 +1352,8 @@ function updateCompetitors() {
         addNotification('-100 COMPETITOR!', '#FF1744',
           isoToScreen(comp.targetPt.x, comp.targetPt.y).sx,
           isoToScreen(comp.targetPt.x, comp.targetPt.y).sy);
-        sfx('competitor');
+        sfx('penalty');
+        G.shakeTimer = 0.18; G.shakeIntensity = 4;
       }
     } else {
       comp.x += (dx / dist) * comp.speed * G.dt;
@@ -2784,7 +2849,6 @@ function render() {
         drawTechnician(ctx);
       }
       drawWeather(ctx);
-      drawParticles(ctx);
 
       if (G.state === STATES.CLIMBING) drawClimbUI(ctx);
       if (G.state === STATES.NEGOTIATING) drawNegotiationUI(ctx);
@@ -2814,11 +2878,13 @@ function render() {
         ctx.font = '14px Nunito';
         ctx.fillText('ESC / P', CW/2, CH/2 + 35);
       }
-      // Proximity hint
+      // Proximity hint + far-target waypoint arrow
       if (G.state === STATES.PLAYING && tech.z === 0) {
+        let nearest = null, nearestDist = Infinity;
         G.installPoints.forEach(pt => {
           if (pt.done) return;
           const dist = Math.sqrt((tech.x - pt.x)**2 + (tech.y - pt.y)**2);
+          if (dist < nearestDist) { nearestDist = dist; nearest = pt; }
           if (dist < 1.5) {
             const pos = isoToScreen(pt.x, pt.y, pt.floors);
             if (pt.takenByCompetitor) {
@@ -2835,6 +2901,35 @@ function render() {
             }
           }
         });
+        // Waypoint arrow: when target is far and off-screen-ish, draw an arrow near the canvas edge
+        if (nearest && nearestDist > 2.5) {
+          const target = isoToScreen(nearest.x, nearest.y, nearest.floors);
+          const tx = target.sx, ty = target.sy;
+          const offX = tx < 40 || tx > CW - 40 || ty < 40 || ty > CH - 40;
+          if (offX) {
+            const cx = CW / 2, cy = CH / 2;
+            const dx = tx - cx, dy = ty - cy;
+            const ang = Math.atan2(dy, dx);
+            const margin = 50;
+            const ex = cx + Math.cos(ang) * (CW / 2 - margin);
+            const ey = cy + Math.sin(ang) * (CH / 2 - margin);
+            const pulse = 0.7 + Math.sin(performance.now() / 200) * 0.3;
+            ctx.save();
+            ctx.translate(ex, ey);
+            ctx.rotate(ang);
+            ctx.fillStyle = nearest.takenByCompetitor
+              ? `rgba(255,152,0,${pulse})`
+              : `rgba(0,230,118,${pulse})`;
+            ctx.beginPath();
+            ctx.moveTo(20, 0);
+            ctx.lineTo(-10, -10);
+            ctx.lineTo(-4, 0);
+            ctx.lineTo(-10, 10);
+            ctx.closePath();
+            ctx.fill();
+            ctx.restore();
+          }
+        }
       }
       break;
     case STATES.LEVEL_CLEAR:
